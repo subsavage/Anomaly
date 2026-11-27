@@ -1,0 +1,58 @@
+package com.anomaly.game.narrative
+
+import org.junit.Assert.*
+import org.junit.Test
+
+class EchoDialogueManagerTest {
+    @Test fun routineMessagesRespectTenSecondCooldown() {
+        val manager = EchoDialogueManager()
+        val first = manager.offer(DialogueEvent.FIRST_STREAK, 0)!!
+        manager.dismiss(first.id)
+        assertNull(manager.offer(DialogueEvent.COMBO_MILESTONE, 9_999))
+        assertNotNull(manager.offer(DialogueEvent.COMBO_MILESTONE, 10_000))
+    }
+
+    @Test fun importantMessageCanOverrideRoutineCooldownAndVisibleRoutine() {
+        val manager = EchoDialogueManager()
+        val routine = manager.offer(DialogueEvent.FIRST_STREAK, 1_000)!!
+        val important = manager.offer(DialogueEvent.LOW_INTEGRITY, 1_100)
+        assertNotNull(important)
+        assertNotEquals(routine.id, important!!.id)
+        assertEquals(DialoguePriority.IMPORTANT, manager.activeMessage?.priority)
+    }
+
+    @Test fun activeImportantMessageCannotBeInterrupted() {
+        val manager = EchoDialogueManager()
+        val first = manager.offer(DialogueEvent.PATTERN_TRANSITION, 500)!!
+        assertNull(manager.offer(DialogueEvent.LOW_INTEGRITY, 600))
+        assertNull(manager.offer(DialogueEvent.FIRST_STREAK, 700))
+        assertEquals(first, manager.activeMessage)
+    }
+
+    @Test fun alternativeLinesAvoidImmediateRepetition() {
+        val manager = EchoDialogueManager()
+        val first = manager.offer(DialogueEvent.FIRST_STREAK, 0)!!
+        val second = manager.offer(DialogueEvent.FIRST_STREAK, 10_000)!!
+        val third = manager.offer(DialogueEvent.FIRST_STREAK, 20_000)!!
+        assertNotEquals(first.text, second.text)
+        assertNotEquals(second.text, third.text)
+    }
+
+    @Test fun operationSpecificDialogueAndBriefingAreAvailable() {
+        val operation = EchoDialogueRepository.operation("004")!!
+        assertEquals("UNKNOWN SIGNAL", operation.title)
+        assertTrue(operation.briefing.isNotEmpty())
+        val message = EchoDialogueManager().offer(DialogueEvent.UNUSUAL_SYSTEM, 0, operationId = "004")
+        assertEquals("That response came from inside the system. No one told me it could answer.", message?.text)
+    }
+
+    @Test fun messagesExpireAndCanBeDismissedByIdentity() {
+        val manager = EchoDialogueManager(importantDurationMillis = 1_000)
+        val first = manager.offer(DialogueEvent.LOW_INTEGRITY, 0)!!
+        manager.dismiss(first.id + 1)
+        assertEquals(first, manager.activeMessage)
+        val next = manager.offer(DialogueEvent.PATTERN_TRANSITION, 1_000)
+        assertNotNull(next)
+        assertNotEquals(first.id, next!!.id)
+    }
+}

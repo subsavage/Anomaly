@@ -19,22 +19,35 @@ object ObjectGenerator {
 }
 
 object PatternGenerator {
-    fun next(random: Random, level: Int): Rule = when (random.nextInt(if (level >= 2) 3 else 2)) {
-        0 -> {
-            val candidates = listOf(listOf(Shape.CIRCLE, Shape.SQUARE, Shape.TRIANGLE), listOf(Shape.CIRCLE, Shape.TRIANGLE), listOf(Shape.SQUARE, Shape.SQUARE, Shape.CIRCLE))
-            val seq = candidates.random(random)
-            Rule(Family.SEQUENCE, seq.joinToString("  ›  ") { it.name.lowercase().replaceFirstChar(Char::uppercase) }, sequence = seq)
+    fun next(random: Random, level: Int): Rule {
+        if (level == 0) return attribute(random, level)
+        return when (random.nextInt(if (level >= 2) 3 else 2)) {
+            0 -> sequence(random)
+            1 -> attribute(random, level)
+            else -> Rule(Family.RELATIONSHIP, "Dot count increases by one", relation = "dots+1")
         }
-        1 -> if (level >= 1 && random.nextBoolean()) {
-            val hue = Hue.entries.random(random); val n = random.nextInt(4)
-            Rule(Family.ATTRIBUTE, "${hue.name.lowercase()} · exactly $n dots", hue = hue, dots = n)
-        } else if (random.nextBoolean()) {
-            val hue = Hue.entries.random(random); Rule(Family.ATTRIBUTE, "Every object is ${hue.name.lowercase()}", hue = hue)
-        } else { val n = random.nextInt(4); Rule(Family.ATTRIBUTE, "Exactly $n dots", dots = n) }
-        else -> Rule(Family.RELATIONSHIP, "Dot count increases by one", relation = "dots+1")
+    }
+
+    private fun sequence(random: Random): Rule {
+        val candidates = listOf(
+            listOf(Shape.CIRCLE, Shape.SQUARE, Shape.TRIANGLE),
+            listOf(Shape.CIRCLE, Shape.TRIANGLE),
+            listOf(Shape.SQUARE, Shape.SQUARE, Shape.CIRCLE)
+        )
+        val sequence = candidates.random(random)
+        val label = sequence.joinToString("  ›  ") { it.displayName() }
+        return Rule(Family.SEQUENCE, label, sequence = sequence)
+    }
+
+    private fun attribute(random: Random, level: Int): Rule = if (level >= 1 && random.nextBoolean()) {
+        val hue = Hue.entries.random(random); val dots = random.nextInt(4)
+        Rule(Family.ATTRIBUTE, "${hue.name.lowercase()} · exactly ${dots.dotLabel().lowercase()}", hue = hue, dots = dots)
+    } else if (random.nextBoolean()) {
+        val hue = Hue.entries.random(random); Rule(Family.ATTRIBUTE, "Every object is ${hue.name.lowercase()}", hue = hue)
+    } else {
+        val dots = random.nextInt(4); Rule(Family.ATTRIBUTE, "Exactly ${dots.dotLabel().lowercase()}", dots = dots)
     }
 }
-
 object PatternEvaluator {
     fun follows(item: GameObject, rule: Rule, history: List<GameObject>): Boolean = when (rule.family) {
         Family.SEQUENCE -> rule.sequence.isNotEmpty() && item.shape == rule.sequence[history.size % rule.sequence.size]
@@ -43,6 +56,17 @@ object PatternEvaluator {
     }
 }
 
+private fun Shape.displayName(): String = name.lowercase().replaceFirstChar(Char::uppercase)
+private fun Int.dotLabel(): String = "$this ${if (this == 1) "DOT" else "DOTS"}"
+
+/** Shape loops are always identified as repeating and expose the next expected shape. Other rules keep their established direct wording. */
+fun Rule.playerInstruction(history: List<GameObject>): String = if (family == Family.SEQUENCE) {
+    "Repeating order: ${sequence.joinToString(" → ") { it.displayName() }}"
+} else label
+
+fun Rule.focusCue(history: List<GameObject>): String = if (family == Family.SEQUENCE && sequence.isNotEmpty()) {
+    "NEXT SHAPE: ${sequence[history.size % sequence.size].displayName()}"
+} else label
 object AnomalyGenerator {
     fun generate(random: Random, rule: Rule, history: List<GameObject>): GameObject {
         repeat(20) {
