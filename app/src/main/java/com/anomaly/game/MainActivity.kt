@@ -5,13 +5,8 @@ import android.os.Build
 import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -55,6 +50,13 @@ import com.anomaly.game.narrative.DialogueEvent
 import com.anomaly.game.narrative.DialogueMessage
 import com.anomaly.game.narrative.EchoDialogueManager
 import com.anomaly.game.narrative.EchoDialogueRepository
+import com.anomaly.game.narrative.AssistanceLevel
+import com.anomaly.game.narrative.EchoAssistanceEvaluator
+import com.anomaly.game.narrative.EchoInterferenceController
+import com.anomaly.game.narrative.InterferencePlan
+import com.anomaly.game.narrative.InterferenceTransmission
+import com.anomaly.game.narrative.InterferenceStage
+import com.anomaly.game.narrative.CommunicationStatus
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -62,6 +64,7 @@ import kotlin.random.Random
 
 private val android.content.Context.dataStore by preferencesDataStore("anomaly_settings")
 private val bestKey = intPreferencesKey("personal_best")
+private val completedRunsKey = intPreferencesKey("completed_runs")
 private val soundKey = booleanPreferencesKey("sound")
 private val hapticKey = booleanPreferencesKey("haptics")
 private val echoDialogueKey = booleanPreferencesKey("echo_dialogue")
@@ -115,6 +118,14 @@ private class ArcadeModel(private val context: android.content.Context) : ViewMo
     val showBriefing: StateFlow<Boolean> = _showBriefing.asStateFlow()
     private val _echoMessage = MutableStateFlow<DialogueMessage?>(null)
     val echoMessage: StateFlow<DialogueMessage?> = _echoMessage.asStateFlow()
+    private val _transmission = MutableStateFlow<InterferenceTransmission?>(null)
+    val transmission: StateFlow<InterferenceTransmission?> = _transmission.asStateFlow()
+    private val _hintedAnomaly = MutableStateFlow<Boolean?>(null)
+    val hintedAnomaly: StateFlow<Boolean?> = _hintedAnomaly.asStateFlow()
+    private var assistance = EchoAssistanceEvaluator()
+    private var interference = EchoInterferenceController(InterferencePlan.forCompletedRuns(0))
+    private var runGeneration = 0
+    private var runFinishedPersisted = true
     private var briefingReturnsToSettings = false
     private var runStartedAt = 0L
     private var consecutiveMistakes = 0
@@ -124,18 +135,28 @@ private class ArcadeModel(private val context: android.content.Context) : ViewMo
 
     fun requestPlay() {
         viewModelScope.launch {
-            val briefingSeen = context.dataStore.data.first()[briefingSeenKey] ?: false
-            if (briefingSeen) startRun() else openBriefing(fromSettings = false)
+            val prefs = context.dataStore.data.first()
+            if (prefs[briefingSeenKey] ?: false) startRun(resolveCompletedRuns(prefs), (prefs[echoDialogueKey] ?: true) && (prefs[subtitlesKey] ?: true)) else openBriefing(fromSettings = false)
         }
     }
 
-    fun playAgain() = startRun()
+    fun playAgain() { viewModelScope.launch {
+        val prefs = context.dataStore.data.first()
+        startRun(resolveCompletedRuns(prefs), (prefs[echoDialogueKey] ?: true) && (prefs[subtitlesKey] ?: true))
+    } }
 
-    private fun startRun() {
+    private fun startRun(completedRuns: Int, communicationEnabled: Boolean) {
         _showBriefing.value = false
         _state.value = engine.state.copy(settings = false, tutorialStep = 0)
         echoManager.beginRun()
         _echoMessage.value = null
+        _transmission.value = null
+        _hintedAnomaly.value = null
+        assistance.reset()
+        val plan = if (communicationEnabled) InterferencePlan.forCompletedRuns(completedRuns) else InterferencePlan.forCompletedRuns(0)
+        interference = EchoInterferenceController(plan)
+        runGeneration++
+        runFinishedPersisted = false
         runStartedAt = SystemClock.elapsedRealtime()
         consecutiveMistakes = 0
         pendingTransitionAtTotal = null
@@ -155,7 +176,7 @@ private class ArcadeModel(private val context: android.content.Context) : ViewMo
                     finalSecondsNotified = sendDialogue(DialogueEvent.FINAL_SECONDS)
                 }
             }
-            if (engine.state.finished) persistBest()
+            if (engine.state.finished) recordCompletedRun()
         }
     }
 
@@ -173,6 +194,11 @@ private class ArcadeModel(private val context: android.content.Context) : ViewMo
         audio.playEffect(if (current.stats.correct > previous.stats.correct) AudioCue.CORRECT else AudioCue.INCORRECT)
         val round = previous.current
         val correct = current.stats.correct > previous.stats.correct
+        val reactionMillis = if (correct && round != null) (current.stats.reactionTotal - previous.stats.reactionTotal).coerceAtLeast(0L) else round?.deadlineMs ?: 0L
+        val elapsed = (SystemClock.elapsedRealtime() - runStartedAt).coerceAtLeast(0L)
+        assistance.record(correct, reactionMillis)
+        _hintedAnomaly.value = null
+        interference.objectResolved()?.let(::showInterferenceTransmission)
 
         val pendingTransition = pendingTransitionAtTotal
         if (pendingTransition != null && previous.stats.total >= pendingTransition) {
@@ -193,7 +219,8 @@ private class ArcadeModel(private val context: android.content.Context) : ViewMo
             if (consecutiveMistakes == 2) sendDialogue(DialogueEvent.REPEATED_MISTAKES)
         }
 
-        if (previous.integrity > 1 && current.integrity == 1) sendDialogue(DialogueEvent.LOW_INTEGRITY)
+        val lowIntegrityEvent = previous.integrity > 1 && current.integrity == 1
+        if (lowIntegrityEvent) sendDialogue(DialogueEvent.LOW_INTEGRITY)
         if (current.stats.transitions > previous.stats.transitions) {
             pendingTransitionAtTotal = current.stats.total
             if (current.stats.transitions >= 3 && !unusualSignalNotified) {
@@ -203,14 +230,33 @@ private class ArcadeModel(private val context: android.content.Context) : ViewMo
                 sendDialogue(DialogueEvent.PATTERN_TRANSITION)
             }
         }
-        if (current.finished) persistBest()
+        if (current.current != null) {
+            val transitionEvent = current.stats.transitions > previous.stats.transitions ||
+                current.message == "PATTERN SHIFT" || current.message == "SYSTEM ALERT · PATTERN SHIFT NEXT"
+            val deferInterference = transitionEvent || lowIntegrityEvent || echoManager.hasActiveImportant(elapsed)
+            interference.objectAvailable(current.stats.total + 1, deferInterference)?.let(::showInterferenceTransmission)
+
+            if (!interference.suppressAssistance && current.running) {
+                val level = assistance.eligibleHint(elapsed)
+                if (level != AssistanceLevel.NONE) {
+                    val event = if (level == AssistanceLevel.DIRECT) DialogueEvent.ASSISTANCE_HINT else DialogueEvent.ASSISTANCE_NUDGE
+                    val target = if (current.current.isAnomaly) "ANOMALY" else "NORMAL"
+                    if (sendDialogue(event, mapOf("{target}" to target))) {
+                        assistance.markHintOffered(level, elapsed)
+                        if (level == AssistanceLevel.DIRECT) _hintedAnomaly.value = current.current.isAnomaly
+                    }
+                }
+            }
+        }
+        if (current.finished) recordCompletedRun()
     }
 
-    private fun sendDialogue(event: DialogueEvent): Boolean {
+    private fun sendDialogue(event: DialogueEvent, replacements: Map<String, String> = emptyMap()): Boolean {
         val prefs = preferences.value
-        if (!prefs.echoDialogue || !prefs.subtitles) return false
+        if (!prefs.echoDialogue || !prefs.subtitles || interference.suppressOrdinaryDialogue) return false
         val elapsed = (SystemClock.elapsedRealtime() - runStartedAt).coerceAtLeast(0L)
-        val message = echoManager.offer(event, elapsed, EchoDialogueRepository.initialOperation.id) ?: return false
+        val offered = echoManager.offer(event, elapsed, EchoDialogueRepository.initialOperation.id) ?: return false
+        val message = offered.copy(text = replacements.entries.fold(offered.text) { text, (key, value) -> text.replace(key, value) })
         _echoMessage.value = message
         viewModelScope.launch {
             delay(message.durationMillis)
@@ -222,11 +268,44 @@ private class ArcadeModel(private val context: android.content.Context) : ViewMo
         return true
     }
 
-    private fun persistBest() {
+    private fun showInterferenceTransmission(message: InterferenceTransmission) {
+        echoManager.interruptActive()
+        _echoMessage.value = null
+        _hintedAnomaly.value = null
+        _transmission.value = message
+        if (message.stage == InterferenceStage.RECOVERY_FIRST) {
+            val generation = runGeneration
+            viewModelScope.launch {
+                delay(1_100L)
+                if (generation != runGeneration || interference.status != CommunicationStatus.RECOVERING) return@launch
+                interference.recoverySecond()?.let { _transmission.value = it }
+                delay(1_500L)
+                if (generation != runGeneration || interference.status != CommunicationStatus.RECOVERING) return@launch
+                interference.finishRecovery()
+                _transmission.value = null
+            }
+        }
+    }
+
+    private fun recordCompletedRun() {
+        if (runFinishedPersisted) return
+        runFinishedPersisted = true
         viewModelScope.launch {
             val newBest = engine.result(best.value).best
-            context.dataStore.edit { it[bestKey] = newBest }
+            context.dataStore.edit {
+                it[bestKey] = newBest
+                it[completedRunsKey] = (it[completedRunsKey] ?: 0) + 1
+            }
         }
+    }
+
+    private suspend fun resolveCompletedRuns(prefs: androidx.datastore.preferences.core.Preferences): Int {
+        val stored = prefs[completedRunsKey]
+        if (stored != null) return stored
+        // Existing installs have a best score but no run counter; treat them as past the clean onboarding runs.
+        val migrated = if ((prefs[bestKey] ?: 0) > 0) 2 else 0
+        if (migrated > 0) context.dataStore.edit { it[completedRunsKey] = migrated }
+        return migrated
     }
 
     val briefingButtonLabel: String get() = if (briefingReturnsToSettings) "RETURN TO SETTINGS" else "BEGIN OPERATION"
@@ -243,7 +322,11 @@ private class ArcadeModel(private val context: android.content.Context) : ViewMo
         _showBriefing.value = false
         viewModelScope.launch {
             context.dataStore.edit { it[briefingSeenKey] = true }
-            if (returnToSettings) _state.value = _state.value.copy(settings = true) else startRun()
+            if (returnToSettings) _state.value = _state.value.copy(settings = true)
+            else {
+                val prefs = context.dataStore.data.first()
+                startRun(resolveCompletedRuns(prefs), (prefs[echoDialogueKey] ?: true) && (prefs[subtitlesKey] ?: true))
+            }
         }
     }
 
@@ -310,6 +393,8 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
     val preferences by model.preferences.collectAsState()
     val showBriefing by model.showBriefing.collectAsState()
     val echoMessage by model.echoMessage.collectAsState()
+    val transmission by model.transmission.collectAsState()
+    val hintedAnomaly by model.hintedAnomaly.collectAsState()
     MaterialTheme { Surface(Modifier.fillMaxSize(), color = bg) {
         Box(Modifier.fillMaxSize().safeDrawingPadding()) {
             when {
@@ -327,6 +412,8 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
                 state.running -> GameScreen(
                     state,
                     if (preferences.echoDialogue && preferences.subtitles) echoMessage else null,
+                    if (preferences.echoDialogue && preferences.subtitles) transmission else null,
+                    hintedAnomaly,
                     onAnswer = { anomaly ->
                         if (preferences.haptics) {
                             val correct = state.current?.isAnomaly == anomaly
@@ -381,7 +468,7 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
     }
 }
 
-@Composable private fun GameScreen(s: GameState, echoMessage: DialogueMessage?, onAnswer: (Boolean)->Unit) {
+@Composable private fun GameScreen(s: GameState, echoMessage: DialogueMessage?, transmission: InterferenceTransmission?, hintedAnomaly: Boolean?, onAnswer: (Boolean)->Unit) {
     val round=s.current; val rule=round?.ruleAtSpawn ?: s.rule
     val feedbackShake = remember { Animatable(0f) }
     LaunchedEffect(s.stats.total) {
@@ -410,6 +497,8 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
             Row(horizontalArrangement=Arrangement.spacedBy(7.dp)) { s.history.takeLast(5).forEach { ObjectGlyph(it, Modifier.size(26.dp)) } }
         }
         Spacer(Modifier.height(8.dp))
+        EchoCommunicationPanel(echoMessage, transmission, Modifier.fillMaxWidth())
+        Spacer(Modifier.height(8.dp))
         Box(Modifier.weight(1f).fillMaxWidth().offset(x=feedbackShake.value.dp).background(Brush.verticalGradient(listOf(bgSecondary, bg)), RoundedCornerShape(20.dp)).border(1.dp, if(s.integrity==1) amber.copy(alpha=.6f) else border.copy(alpha=.55f), RoundedCornerShape(20.dp)), contentAlignment=Alignment.Center) {
             Canvas(Modifier.fillMaxSize()) {
                 var y=6.dp.toPx(); while(y<size.height) { drawLine(white.copy(alpha=.018f), Offset(0f,y), Offset(size.width,y), 1.dp.toPx()); y+=6.dp.toPx() }
@@ -424,44 +513,104 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
                 Text(rule?.focusCue(s.history)?.let(::instructionWithColorWords) ?: AnnotatedString("READ THE ACTIVE RULE"), color=cyan, fontSize=14.sp, fontWeight=FontWeight.Bold, textAlign=TextAlign.Center, maxLines=2, modifier=Modifier.padding(top=6.dp))
                 if(s.stats.combo>=3) Text("${s.stats.combo}× COMBO${if(s.stats.combo>=5) "  ·  MULTIPLIER" else if(s.stats.combo==3) "  ·  STREAK" else ""}", color=cyan, fontFamily=systemMono, fontSize=10.sp, letterSpacing=1.2.sp, modifier=Modifier.padding(top=4.dp))
             }
-            EchoDialogueOverlay(echoMessage, Modifier.align(Alignment.BottomCenter).padding(horizontal=10.dp, vertical=10.dp))
         }
         Spacer(Modifier.height(12.dp))
         Row(Modifier.fillMaxWidth().height(116.dp), horizontalArrangement=Arrangement.spacedBy(12.dp)) {
-            DecisionZone("NORMAL", "FOLLOWS THE RULE", cyan, Modifier.weight(1f), onClick={onAnswer(false)})
-            DecisionZone("ANOMALY", "BREAKS THE RULE", coral, Modifier.weight(1f), onClick={onAnswer(true)})
+            DecisionZone("NORMAL", "FOLLOWS THE RULE", cyan, Modifier.weight(1f), hinted=hintedAnomaly == false, onClick={onAnswer(false)})
+            DecisionZone("ANOMALY", "BREAKS THE RULE", coral, Modifier.weight(1f), hinted=hintedAnomaly == true, onClick={onAnswer(true)})
         }
     }
 }
 
-@Composable private fun EchoDialogueOverlay(message: DialogueMessage?, modifier: Modifier = Modifier) {
-    AnimatedVisibility(
-        modifier = modifier,
-        visible = message != null,
-        enter = fadeIn() + slideInVertically(initialOffsetY = { it / 3 }),
-        exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 3 })
+@Composable private fun EchoCommunicationPanel(message: DialogueMessage?, transmission: InterferenceTransmission?, modifier: Modifier = Modifier) {
+    val takeover = transmission?.status == CommunicationStatus.COMPROMISED
+    val accent = when (transmission?.status) {
+        CommunicationStatus.WARNING -> amber
+        CommunicationStatus.COMPROMISED -> coral
+        CommunicationStatus.RECOVERING -> cyan
+        else -> if (message?.event in setOf(DialogueEvent.LOW_INTEGRITY, DialogueEvent.FINAL_SECONDS)) amber else cyan
+    }
+    val status = when (transmission?.stage) {
+        InterferenceStage.WARNING, InterferenceStage.WARNING_SECOND -> "SIGNAL WARNING"
+        InterferenceStage.TAKEOVER -> "COMPROMISED"
+        InterferenceStage.RECOVERY_FIRST -> "RECONNECTING"
+        InterferenceStage.RECOVERY_SECOND -> "RESTORED"
+        null -> when (message?.event) {
+            DialogueEvent.LOW_INTEGRITY -> "CRITICAL"
+            DialogueEvent.FINAL_SECONDS -> "WARNING"
+            null -> if(message == null) "ONLINE" else "TRANSMITTING"
+            else -> "TRANSMITTING"
+        }
+    }
+    val shortMessage = when (transmission?.stage) {
+        InterferenceStage.WARNING -> "EXTERNAL ACCESS DETECTED"
+        InterferenceStage.WARNING_SECOND -> "INTERFERENCE DETECTED"
+        InterferenceStage.TAKEOVER -> "DON'T LISTEN TO ECHO."
+        InterferenceStage.RECOVERY_FIRST -> "OPERATOR? CAN YOU HEAR ME?"
+        InterferenceStage.RECOVERY_SECOND -> "THAT WASN'T ME."
+        null -> when (message?.event) {
+            null -> "MONITORING SIGNAL"
+            DialogueEvent.ASSISTANCE_NUDGE -> "CHECK THE ACTIVE RULE"
+            DialogueEvent.ASSISTANCE_HINT -> Regex("NORMAL|ANOMALY").find(message.text)?.value?.let { "THIS OBJECT: $it" } ?: "CHECK THE CURRENT OBJECT"
+            DialogueEvent.PATTERN_TRANSITION -> "NEW PROTOCOL"
+            DialogueEvent.TRANSITION_SURVIVED -> "PROTOCOL HELD"
+            DialogueEvent.REPEATED_MISTAKES -> "RECHECK THE ACTIVE RULE"
+            DialogueEvent.LOW_INTEGRITY -> "INTEGRITY CRITICAL"
+            DialogueEvent.FINAL_SECONDS -> "TEN SECONDS REMAIN"
+            DialogueEvent.UNUSUAL_SYSTEM -> "UNUSUAL SIGNAL DETECTED"
+            DialogueEvent.FIRST_STREAK -> "STREAK DETECTED"
+            DialogueEvent.COMBO_MILESTONE -> "COMBO MILESTONE"
+            DialogueEvent.SUBTLE_CATCH -> "ANOMALY CONFIRMED"
+            DialogueEvent.HIGH_PERFORMANCE -> "PERFORMANCE ABOVE BASELINE"
+        }
+    }
+    val waveform = remember { Animatable(.22f) }
+    val isTransmitting = transmission != null || message != null
+    LaunchedEffect(message?.id, transmission?.stage) {
+        if (isTransmitting) {
+            repeat(2) {
+                waveform.animateTo(.9f, tween(100))
+                waveform.animateTo(.25f, tween(160))
+            }
+        } else waveform.snapTo(.22f)
+    }
+
+    Row(
+        modifier.height(48.dp)
+            .background(if(takeover) coral.copy(alpha=.09f) else bgSecondary, RoundedCornerShape(9.dp))
+            .border(1.dp, accent.copy(alpha=if(takeover) .42f else .26f), RoundedCornerShape(9.dp))
+            .padding(horizontal=10.dp, vertical=5.dp),
+        verticalAlignment=Alignment.CenterVertically
     ) {
-        val current = message
-        if (current != null) {
-            Row(
-                Modifier.fillMaxWidth()
-                    .background(panelRaised.copy(alpha=.96f), RoundedCornerShape(12.dp))
-                    .border(1.dp, cyan.copy(alpha = .25f), RoundedCornerShape(12.dp))
-                    .padding(horizontal = 12.dp, vertical = 7.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(Modifier.size(6.dp).background(cyan, RoundedCornerShape(50)))
-                Column(Modifier.padding(start = 10.dp)) {
-                    Text("ECHO  ·  SECURE CHANNEL", color = cyan, fontFamily=systemMono, fontSize = 8.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.3.sp)
-                    Text(current.text, color = white, fontSize = 11.sp, lineHeight = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Box(Modifier.size(7.dp).background(accent, RoundedCornerShape(50)))
+        Column(Modifier.weight(1f).padding(start=8.dp), verticalArrangement=Arrangement.Center) {
+            Row(verticalAlignment=Alignment.CenterVertically) {
+                Text("ECHO", color=white, fontFamily=systemMono, fontSize=9.sp, fontWeight=FontWeight.Bold, letterSpacing=1.1.sp)
+                Text("  /  $status", color=accent, fontFamily=systemMono, fontSize=8.sp, fontWeight=FontWeight.Bold, letterSpacing=.8.sp, maxLines=1, overflow=TextOverflow.Ellipsis)
+            }
+            Text(shortMessage, color=white, fontFamily=if(takeover) systemMono else FontFamily.Default, fontSize=10.sp, lineHeight=12.sp, maxLines=1, overflow=TextOverflow.Ellipsis)
+        }
+        Canvas(Modifier.width(34.dp).height(20.dp)) {
+            val base = listOf(.28f, .62f, .4f, .82f, .36f)
+            val gap = 5.dp.toPx()
+            base.forEachIndexed { index, value ->
+                val amp = value * if(isTransmitting) waveform.value else .38f
+                val barHeight = size.height * amp
+                val x = index * gap + 2.dp.toPx()
+                if(takeover && index == 2) {
+                    drawLine(accent.copy(alpha=.7f), Offset(x, size.height*.25f), Offset(x+2.dp.toPx(), size.height*.25f), strokeWidth=2.dp.toPx())
+                    drawLine(accent.copy(alpha=.55f), Offset(x+4.dp.toPx(), size.height*.8f), Offset(x+6.dp.toPx(), size.height*.8f), strokeWidth=2.dp.toPx())
+                } else {
+                    drawLine(accent.copy(alpha=if(isTransmitting) .8f else .42f), Offset(x, (size.height-barHeight)/2), Offset(x, (size.height+barHeight)/2), strokeWidth=2.dp.toPx())
                 }
             }
         }
     }
 }
 
-@Composable private fun DecisionZone(title:String, sub:String, color:Color, modifier:Modifier, onClick:()->Unit) {
-    Column(modifier.fillMaxHeight().background(color.copy(alpha=.09f), RoundedCornerShape(18.dp)).border(1.dp,color.copy(alpha=.42f),RoundedCornerShape(18.dp)).clickable(onClick=onClick).padding(12.dp), horizontalAlignment=Alignment.CenterHorizontally, verticalArrangement=Arrangement.Center) {
+@Composable private fun DecisionZone(title:String, sub:String, color:Color, modifier:Modifier, hinted:Boolean=false, onClick:()->Unit) {
+    Column(modifier.fillMaxHeight().background(color.copy(alpha=if(hinted) .15f else .09f), RoundedCornerShape(18.dp)).border(1.dp,color.copy(alpha=if(hinted) .72f else .42f),RoundedCornerShape(18.dp)).clickable(onClick=onClick).padding(12.dp), horizontalAlignment=Alignment.CenterHorizontally, verticalArrangement=Arrangement.Center) {
+        if(hinted) Text("ECHO SIGNAL",color=color,fontFamily=systemMono,fontSize=7.sp,fontWeight=FontWeight.Bold,letterSpacing=1.sp,modifier=Modifier.padding(bottom=4.dp))
         Text(title,color=color,fontSize=19.sp,fontWeight=FontWeight.Black,letterSpacing=1.5.sp); Text(sub,color=muted,fontSize=8.sp,letterSpacing=1.sp,modifier=Modifier.padding(top=5.dp))
     }
 }

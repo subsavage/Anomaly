@@ -1,6 +1,6 @@
 package com.anomaly.game.narrative
 
-enum class DialoguePriority(val rank: Int) { ROUTINE(0), IMPORTANT(1) }
+enum class DialoguePriority(val rank: Int) { ROUTINE(0), ASSISTANCE(1), IMPORTANT(2), CRITICAL(3) }
 
 enum class DialogueEvent(val priority: DialoguePriority) {
     FIRST_STREAK(DialoguePriority.ROUTINE),
@@ -10,8 +10,10 @@ enum class DialogueEvent(val priority: DialoguePriority) {
     PATTERN_TRANSITION(DialoguePriority.IMPORTANT),
     TRANSITION_SURVIVED(DialoguePriority.ROUTINE),
     HIGH_PERFORMANCE(DialoguePriority.ROUTINE),
-    LOW_INTEGRITY(DialoguePriority.IMPORTANT),
-    FINAL_SECONDS(DialoguePriority.IMPORTANT),
+    ASSISTANCE_NUDGE(DialoguePriority.ASSISTANCE),
+    ASSISTANCE_HINT(DialoguePriority.ASSISTANCE),
+    LOW_INTEGRITY(DialoguePriority.CRITICAL),
+    FINAL_SECONDS(DialoguePriority.CRITICAL),
     UNUSUAL_SYSTEM(DialoguePriority.IMPORTANT)
 }
 
@@ -68,6 +70,16 @@ object EchoDialogueRepository {
             "I might have underestimated you.",
             "That was precise. I won't tell Control you made it look easy.",
             "Excellent work. I said that once; don't make me repeat it."
+        ),
+        DialogueEvent.ASSISTANCE_NUDGE to listOf(
+            "Compare this one with the active rule.",
+            "Check the current protocol before you call it.",
+            "The answer is in the rule that's still on screen."
+        ),
+        DialogueEvent.ASSISTANCE_HINT to listOf(
+            "Next one: {target}.",
+            "I have this one as {target}.",
+            "For this object, choose {target}."
         ),
         DialogueEvent.LOW_INTEGRITY to listOf(
             "You're down to your last buffer. Watch the active rule.",
@@ -162,7 +174,7 @@ class EchoDialogueManager(
     fun offer(event: DialogueEvent, elapsedMillis: Long, operationId: String = "001"): DialogueMessage? {
         if (activeMessage != null && elapsedMillis >= activeUntil) activeMessage = null
         val current = activeMessage
-        if (current != null && current.priority == DialoguePriority.IMPORTANT) return null
+        if (current != null && current.priority.rank >= DialoguePriority.IMPORTANT.rank && event.priority.rank <= current.priority.rank) return null
         if (current != null && event.priority.rank <= current.priority.rank) return null
         if (event.priority == DialoguePriority.ROUTINE && lastRoutineAt?.let { elapsedMillis - it < routineCooldownMillis } == true) return null
 
@@ -176,7 +188,7 @@ class EchoDialogueManager(
         val text = candidates[index % candidates.size]
         nextLineIndex[key] = index + 1
         lastLine[key] = text
-        val duration = if (event.priority == DialoguePriority.IMPORTANT) importantDurationMillis else routineDurationMillis
+        val duration = if (event.priority.rank >= DialoguePriority.IMPORTANT.rank) importantDurationMillis else routineDurationMillis
         val message = DialogueMessage(nextMessageId++, event, text, event.priority, duration)
         activeMessage = message
         activeUntil = elapsedMillis + duration
@@ -186,5 +198,16 @@ class EchoDialogueManager(
 
     fun dismiss(messageId: Long) {
         if (activeMessage?.id == messageId) activeMessage = null
+    }
+
+    fun hasActiveImportant(elapsedMillis: Long): Boolean {
+        if (activeMessage != null && elapsedMillis >= activeUntil) activeMessage = null
+        return activeMessage?.priority?.rank?.let { it >= DialoguePriority.IMPORTANT.rank } == true
+    }
+
+    /** Lets a higher-priority system transmission take the channel without resetting cooldown history. */
+    fun interruptActive() {
+        activeMessage = null
+        activeUntil = 0L
     }
 }

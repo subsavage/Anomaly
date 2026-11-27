@@ -18,15 +18,26 @@ class EchoDialogueManagerTest {
         val important = manager.offer(DialogueEvent.LOW_INTEGRITY, 1_100)
         assertNotNull(important)
         assertNotEquals(routine.id, important!!.id)
-        assertEquals(DialoguePriority.IMPORTANT, manager.activeMessage?.priority)
+        assertEquals(DialoguePriority.CRITICAL, manager.activeMessage?.priority)
     }
 
     @Test fun activeImportantMessageCannotBeInterrupted() {
         val manager = EchoDialogueManager()
         val first = manager.offer(DialogueEvent.PATTERN_TRANSITION, 500)!!
-        assertNull(manager.offer(DialogueEvent.LOW_INTEGRITY, 600))
+        assertNull(manager.offer(DialogueEvent.PATTERN_TRANSITION, 600))
         assertNull(manager.offer(DialogueEvent.FIRST_STREAK, 700))
         assertEquals(first, manager.activeMessage)
+    }
+
+    @Test fun adaptiveAssistanceCanReplaceRoutineButCriticalWarningsCanReplaceTransitions() {
+        val manager = EchoDialogueManager()
+        manager.offer(DialogueEvent.FIRST_STREAK, 0)
+        val assistance = manager.offer(DialogueEvent.ASSISTANCE_HINT, 100)
+        assertEquals(DialoguePriority.ASSISTANCE, assistance?.priority)
+        val transition = manager.offer(DialogueEvent.PATTERN_TRANSITION, 200)
+        assertEquals(DialoguePriority.IMPORTANT, transition?.priority)
+        val critical = manager.offer(DialogueEvent.FINAL_SECONDS, 300)
+        assertEquals(DialoguePriority.CRITICAL, critical?.priority)
     }
 
     @Test fun alternativeLinesAvoidImmediateRepetition() {
