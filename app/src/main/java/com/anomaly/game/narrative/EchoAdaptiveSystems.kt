@@ -1,5 +1,6 @@
 package com.anomaly.game.narrative
 
+import com.anomaly.game.engine.DecisionResolution
 import java.util.ArrayDeque
 
 enum class AssistanceLevel { NONE, SUBTLE, DIRECT }
@@ -14,20 +15,39 @@ class EchoAssistanceEvaluator(
     private val decisionsBetweenHints: Int = 4,
     private val slowReactionThresholdMillis: Long = 2_000L
 ) {
-    private val recent = ArrayDeque<Pair<Boolean, Long>>()
+    private data class Observation(val correct: Boolean, val reactionMillis: Long?)
+    private val recent = ArrayDeque<Observation>()
     private var mistakesInRow = 0
     private var decisions = 0
     private var lastHintAt: Long? = null
     private var lastHintDecision: Int? = null
     private var lastHintLevel = AssistanceLevel.NONE
 
-    val recentAccuracy: Double? get() = if (recent.isEmpty()) null else recent.count { it.first }.toDouble() / recent.size
-    val recentAverageReactionMillis: Long? get() = if(recent.isEmpty()) null else recent.sumOf { it.second } / recent.size
+    val recentAccuracy: Double? get() = if (recent.isEmpty()) null else recent.count { it.correct }.toDouble() / recent.size
+    val recentAverageReactionMillis: Long? get() {
+        val answered = recent.mapNotNull { it.reactionMillis }
+        return if (answered.isEmpty()) null else answered.sum() / answered.size
+    }
     val consecutiveMistakes: Int get() = mistakesInRow
 
     fun record(correct: Boolean, reactionMillis: Long = 0L) {
+        recordDecision(correct, reactionMillis.coerceAtLeast(0L))
+    }
+
+    fun recordTimeout() {
+        recordDecision(correct = false, reactionMillis = null)
+    }
+
+    /** Rejected or stale inputs are null and do not enter the adaptive window. */
+    fun recordResolution(resolution: DecisionResolution?) {
+        if (resolution == null) return
+        if (resolution.timedOut || resolution.responseTimeMillis == null) recordTimeout()
+        else record(resolution.correct, resolution.responseTimeMillis)
+    }
+
+    private fun recordDecision(correct: Boolean, reactionMillis: Long?) {
         decisions++
-        recent.addLast(correct to reactionMillis.coerceAtLeast(0L))
+        recent.addLast(Observation(correct, reactionMillis))
         while (recent.size > windowSize) recent.removeFirst()
         mistakesInRow = if (correct) 0 else mistakesInRow + 1
         if (recent.size == windowSize && recentAccuracy!! >= recoveryThreshold && mistakesInRow == 0) {

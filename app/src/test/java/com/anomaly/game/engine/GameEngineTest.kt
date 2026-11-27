@@ -32,22 +32,71 @@ class GameEngineTest {
     }
     @Test fun scoringMultipliersFollowComboMilestones() { assertEquals(100,ScoringEngine.points(1)); assertEquals(120,ScoringEngine.points(3)); assertEquals(150,ScoringEngine.points(5)); assertEquals(200,ScoringEngine.points(8)) }
     @Test fun difficultyStaysBounded() { val engine=DifficultyEngine(); var d=Difficulty(); repeat(500){ engine.record(true,300); d=engine.adjust(d) }; assertTrue(d.speed<=1.6f); assertTrue(d.complexity<=2); repeat(500){engine.record(false,2000);d=engine.adjust(d)};assertTrue(d.speed>=.75f);assertTrue(d.complexity>=0) }
-    @Test fun acceptedAnswerCannotScoreTwice() { var now=1_000L;val engine=GameSessionEngine(Random(1)){now};engine.start();val answer=engine.state.current!!.isAnomaly;engine.answer(answer);val first=engine.state.stats;engine.answer(answer);assertEquals(first,engine.state.stats) }
+    @Test fun acceptedAnswerCannotScoreTwiceForTheSameObject() { var now=1_000L;val engine=GameSessionEngine(Random(1)){now};engine.start();val round=engine.state.current!!;assertNotNull(engine.answer(round.decisionId,round.isAnomaly));val first=engine.state;assertNull(engine.answer(round.decisionId,round.isAnomaly));assertEquals(first,engine.state) }
+    @Test fun rapidDecisionForNewObjectIsAcceptedWithinPreviousGuardWindow() {
+        var now=1_000L
+        val engine=GameSessionEngine(Random(41)){now}
+        engine.start()
+        val first=engine.state.current!!
+        assertNotNull(engine.answer(first.decisionId,first.isAnomaly))
+        val second=engine.state.current!!
+        assertNotEquals(first.decisionId,second.decisionId)
+        now+=119L
+        val resolution=engine.answer(second.decisionId,second.isAnomaly)
+        assertNotNull(resolution)
+        assertTrue(resolution!!.correct)
+        assertEquals(2,engine.state.stats.total)
+    }
+    @Test fun staleCallbackCannotResolveTheNewCurrentObject() {
+        var now=1_000L
+        val engine=GameSessionEngine(Random(42)){now}
+        engine.start()
+        val oldRound=engine.state.current!!
+        assertNotNull(engine.answer(oldRound.decisionId,oldRound.isAnomaly))
+        val newRound=engine.state.current!!
+        val before=engine.state
+        now+=200L
+        assertNull(engine.answer(oldRound.decisionId,newRound.isAnomaly))
+        assertEquals(before,engine.state)
+        assertEquals(1,engine.state.stats.total)
+    }
+    @Test fun acceptedResolutionCarriesActualResponseTimeAndClassification() {
+        var now=1_000L
+        val engine=GameSessionEngine(Random(43)){now}
+        engine.start()
+        val round=engine.state.current!!
+        now+=375L
+        val resolution=engine.answer(round.decisionId,round.isAnomaly)!!
+        assertTrue(resolution.correct)
+        assertFalse(resolution.timedOut)
+        assertEquals(375L,resolution.responseTimeMillis)
+    }
+    @Test fun incorrectAnsweredDecisionCarriesItsActualResponseTime() {
+        var now=2_000L
+        val engine=GameSessionEngine(Random(45)){now}
+        engine.start()
+        val round=engine.state.current!!
+        now+=425L
+        val resolution=engine.answer(round.decisionId,!round.isAnomaly)!!
+        assertFalse(resolution.correct)
+        assertFalse(resolution.timedOut)
+        assertEquals(425L,resolution.responseTimeMillis)
+    }
     @Test fun decisionDeadlineCostsOneLifeOnly() { var now=1_000L;val engine=GameSessionEngine(Random(2)){now};engine.start();now+=4_000;engine.tick();val state=engine.state;assertEquals(2,state.integrity);assertEquals(1,state.stats.total);engine.tick();assertEquals(1,state.stats.total) }
     @Test fun timerEndsAtSixtySeconds() { var now=10_000L;val engine=GameSessionEngine(Random(3)){now};engine.start();now+=60_000;engine.tick();assertTrue(engine.state.finished);assertEquals(0,engine.state.remainingMs) }
-    @Test fun transitionsAreCountedAndRuleIsCapturedOnSpawn() { var now=0L;val engine=GameSessionEngine(Random(6)){now};engine.start();repeat(14){now+=200;val round=engine.state.current!!;engine.answer(round.isAnomaly)};assertTrue(engine.state.stats.transitions>=1);assertNotNull(engine.state.current?.ruleAtSpawn) }
+    @Test fun transitionsAreCountedAndRuleIsCapturedOnSpawn() { var now=0L;val engine=GameSessionEngine(Random(6)){now};engine.start();repeat(14){now+=200;val round=engine.state.current!!;engine.answer(round.decisionId,round.isAnomaly)};assertTrue(engine.state.stats.transitions>=1);assertNotNull(engine.state.current?.ruleAtSpawn) }
 
     @Test fun transitionWarningPrecedesBoundaryAndPresentedObjectKeepsItsRule() {
         var now=0L
         val engine=GameSessionEngine(Random(61)){now}
         engine.start()
-        repeat(13) { now+=200; val round=engine.state.current!!; engine.answer(round.isAnomaly) }
+        repeat(13) { now+=200; val round=engine.state.current!!; engine.answer(round.decisionId,round.isAnomaly) }
         assertEquals(13,engine.state.stats.total)
         assertEquals("SYSTEM ALERT · PATTERN SHIFT NEXT",engine.state.message)
         val warnedRound=engine.state.current!!
         val ruleDuringWarning=warnedRound.ruleAtSpawn
         now+=200
-        engine.answer(warnedRound.isAnomaly)
+        engine.answer(warnedRound.decisionId,warnedRound.isAnomaly)
         assertEquals(14,engine.state.stats.total)
         assertEquals(1,engine.state.stats.transitions)
         assertEquals(ruleDuringWarning,warnedRound.ruleAtSpawn)
@@ -62,7 +111,7 @@ class GameEngineTest {
             now+=200
             val round=engine.state.current!!
             val history=engine.state.history
-            engine.answer(!round.isAnomaly)
+            engine.answer(round.decisionId,!round.isAnomaly)
             if(it==2) {
                 val final=engine.state.decisionHistory.last()
                 assertEquals(RunEndReason.INTEGRITY_DEPLETED,engine.state.endReason)
@@ -82,10 +131,14 @@ class GameEngineTest {
         var now=0L
         val engine=GameSessionEngine(Random(19),clock={now})
         engine.start()
-        repeat(3) {
+        repeat(3) { index ->
             val round=engine.state.current!!
             now=round.spawnedAt+round.deadlineMs+1
-            engine.tick()
+            val resolution=engine.tick()
+            assertNotNull(resolution)
+            assertTrue(resolution!!.timedOut)
+            assertNull(resolution.responseTimeMillis)
+            assertEquals(index + 1,engine.state.stats.total)
         }
         val final=engine.state.decisionHistory.last()
         assertEquals(RunEndReason.INTEGRITY_DEPLETED,engine.state.endReason)
@@ -98,11 +151,11 @@ class GameEngineTest {
         var now=0L
         val engine=GameSessionEngine(Random(28)){now}
         engine.start()
-        repeat(14) { now+=200; val round=engine.state.current!!; engine.answer(round.isAnomaly) }
+        repeat(14) { now+=200; val round=engine.state.current!!; engine.answer(round.decisionId,round.isAnomaly) }
         val postTransition=engine.state.current!!
         assertNotNull(postTransition.previousRule)
         now+=200
-        engine.answer(!postTransition.isAnomaly)
+        engine.answer(postTransition.decisionId,!postTransition.isAnomaly)
         val decision=engine.state.decisionHistory.last()
         assertTrue(decision.recentTransition)
         assertNotNull(decision.previousRule)
@@ -114,12 +167,56 @@ class GameEngineTest {
         var now=0L
         val engine=GameSessionEngine(Random(3)){now}
         engine.start()
-        repeat(2) { now+=200; val r=engine.state.current!!; engine.answer(!r.isAnomaly) }
+        repeat(2) { now+=200; val r=engine.state.current!!; engine.answer(r.decisionId,!r.isAnomaly) }
         assertEquals(2,engine.state.decisionHistory.size)
         engine.start()
         assertTrue(engine.state.decisionHistory.isEmpty())
         assertNull(engine.state.endReason)
         assertNull(engine.state.current?.previousRule)
+    }
+
+    @Test fun losingOnFirstObjectAfterTransitionStillCountsTheProtocolChange() {
+        var now=0L
+        val engine=GameSessionEngine(Random(51)){now}
+        engine.start()
+        repeat(2) { now+=200; val round=engine.state.current!!; engine.answer(round.decisionId,!round.isAnomaly) }
+        repeat(12) { now+=200; val round=engine.state.current!!; engine.answer(round.decisionId,round.isAnomaly) }
+        assertEquals(1,engine.state.stats.transitions)
+        assertEquals(1,engine.state.integrity)
+        val firstUnderNewRule=engine.state.current!!
+        now+=200
+        engine.answer(firstUnderNewRule.decisionId,!firstUnderNewRule.isAnomaly)
+        assertEquals(1,engine.state.stats.transitions)
+        assertEquals(RunEndReason.INTEGRITY_DEPLETED,engine.state.endReason)
+    }
+
+    @Test fun successfulFirstObjectAfterTransitionStillCountsTheProtocolChange() {
+        var now=0L
+        val engine=GameSessionEngine(Random(52)){now}
+        engine.start()
+        repeat(14) { now+=200; val round=engine.state.current!!; engine.answer(round.decisionId,round.isAnomaly) }
+        val firstUnderNewRule=engine.state.current!!
+        now+=200
+        engine.answer(firstUnderNewRule.decisionId,firstUnderNewRule.isAnomaly)
+        assertEquals(1,engine.state.stats.transitions)
+        assertEquals(15,engine.state.stats.correct)
+    }
+
+    @Test fun protocolChangeCounterCountsMultipleChangesInOneRun() {
+        var now=0L
+        val engine=GameSessionEngine(Random(53)){now}
+        engine.start()
+        repeat(28) { now+=200; val round=engine.state.current!!; engine.answer(round.decisionId,round.isAnomaly) }
+        assertEquals(2,engine.state.stats.transitions)
+    }
+
+    @Test fun openingTutorialUsesValidExamplesForTheFirstRunRuleFamily() {
+        assertEquals(Family.ATTRIBUTE,OpeningTutorial.rule.family)
+        repeat(100) { seed ->
+            assertEquals(Family.ATTRIBUTE,PatternGenerator.next(Random(seed),level=0).family)
+        }
+        assertTrue(PatternEvaluator.follows(OpeningTutorial.normalExample,OpeningTutorial.rule,emptyList()))
+        assertFalse(PatternEvaluator.follows(OpeningTutorial.anomalyExample,OpeningTutorial.rule,emptyList()))
     }
 
     @Test fun explanationsUseTheSpecificRuleAndObjectAttributes() {

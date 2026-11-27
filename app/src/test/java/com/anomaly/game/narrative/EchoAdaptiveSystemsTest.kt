@@ -1,6 +1,7 @@
 package com.anomaly.game.narrative
 
 import com.anomaly.game.engine.GameSessionEngine
+import com.anomaly.game.engine.DecisionResolution
 import kotlin.random.Random
 import org.junit.Assert.*
 import org.junit.Test
@@ -10,7 +11,57 @@ class EchoAdaptiveSystemsTest {
         val evaluator = EchoAssistanceEvaluator()
         repeat(10) { evaluator.record(correct = true, reactionMillis = 800) }
         assertEquals(1.0, evaluator.recentAccuracy!!, 0.0)
+        assertEquals(800L, evaluator.recentAverageReactionMillis)
         assertEquals(AssistanceLevel.NONE, evaluator.eligibleHint(20_000))
+    }
+
+    @Test fun acceptedCorrectAndIncorrectAnswersUseTheirActualReactionTimes() {
+        val evaluator = EchoAssistanceEvaluator()
+        evaluator.recordResolution(DecisionResolution(1, correct = true, responseTimeMillis = 800L, timedOut = false))
+        assertEquals(800L, evaluator.recentAverageReactionMillis)
+        evaluator.recordResolution(DecisionResolution(2, correct = true, responseTimeMillis = 2_300L, timedOut = false))
+        assertEquals(1_550L, evaluator.recentAverageReactionMillis)
+        evaluator.recordResolution(DecisionResolution(3, correct = false, responseTimeMillis = 150L, timedOut = false))
+        assertEquals(1_083L, evaluator.recentAverageReactionMillis)
+        evaluator.recordResolution(DecisionResolution(4, correct = false, responseTimeMillis = 2_400L, timedOut = false))
+        assertEquals(1_412L, evaluator.recentAverageReactionMillis)
+    }
+
+    @Test fun quickIncorrectAnswersAreNotMisclassifiedAsSlowReactions() {
+        val evaluator = EchoAssistanceEvaluator()
+        repeat(6) { evaluator.record(correct = true, reactionMillis = 1_900L) }
+        repeat(2) { evaluator.record(correct = false, reactionMillis = 100L) }
+        assertEquals(.75, evaluator.recentAccuracy!!, 0.0)
+        assertEquals(1_450L, evaluator.recentAverageReactionMillis)
+        assertEquals(AssistanceLevel.NONE, evaluator.eligibleHint(20_000L))
+    }
+
+    @Test fun timeoutIsAnErrorButDoesNotBecomeAReactionTimeSample() {
+        val evaluator = EchoAssistanceEvaluator()
+        evaluator.recordResolution(DecisionResolution(1, correct = false, responseTimeMillis = null, timedOut = true))
+        assertEquals(0.0, evaluator.recentAccuracy!!, 0.0)
+        assertNull(evaluator.recentAverageReactionMillis)
+        assertEquals(1, evaluator.consecutiveMistakes)
+    }
+
+    @Test fun rejectedDuplicateResolutionDoesNotChangeAssistanceMetrics() {
+        var now = 1_000L
+        val engine = GameSessionEngine(Random(44)) { now }
+        engine.start()
+        val firstRound = engine.state.current!!
+        val evaluator = EchoAssistanceEvaluator()
+        val accepted = engine.answer(firstRound.decisionId, firstRound.isAnomaly)
+        evaluator.recordResolution(accepted)
+        val accuracyBefore = evaluator.recentAccuracy
+        val reactionBefore = evaluator.recentAverageReactionMillis
+        val mistakesBefore = evaluator.consecutiveMistakes
+        now += 200L
+        val rejectedDuplicate = engine.answer(firstRound.decisionId, firstRound.isAnomaly)
+        evaluator.recordResolution(rejectedDuplicate)
+        assertNull(rejectedDuplicate)
+        assertEquals(accuracyBefore, evaluator.recentAccuracy)
+        assertEquals(reactionBefore, evaluator.recentAverageReactionMillis)
+        assertEquals(mistakesBefore, evaluator.consecutiveMistakes)
     }
 
     @Test fun oneMistakeDoesNotTriggerAssistanceButThreeRepeatedErrorsDo() {

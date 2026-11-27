@@ -170,10 +170,10 @@ private class ArcadeModel(private val context: android.content.Context) : ViewMo
             while (engine.state.running) {
                 delay(50)
                 val previous = engine.state
-                engine.tick()
+                val resolution = engine.tick()
                 val current = engine.state
                 _state.value = current
-                handleEngineUpdate(previous, current)
+                handleEngineUpdate(previous, current, resolution)
                 if (current.running && !finalSecondsNotified && current.remainingMs <= 10_000L) {
                     finalSecondsNotified = sendDialogue(DialogueEvent.FINAL_SECONDS)
                 }
@@ -182,23 +182,23 @@ private class ArcadeModel(private val context: android.content.Context) : ViewMo
         }
     }
 
-    fun answer(anomaly: Boolean) {
+    fun answer(decisionId: Long, anomaly: Boolean): DecisionResolution? {
         val previous = engine.state
-        engine.answer(anomaly)
+        val resolution = engine.answer(decisionId, anomaly) ?: return null
         val current = engine.state
         _state.value = current
-        handleEngineUpdate(previous, current)
+        handleEngineUpdate(previous, current, resolution)
+        return resolution
     }
 
-    private fun handleEngineUpdate(previous: GameState, current: GameState) {
+    private fun handleEngineUpdate(previous: GameState, current: GameState, resolution: DecisionResolution?) {
         if (current.stats.total <= previous.stats.total) return
         audio.updateSettings(preferences.value.audio)
         audio.playEffect(if (current.stats.correct > previous.stats.correct) AudioCue.CORRECT else AudioCue.INCORRECT)
         val round = previous.current
         val correct = current.stats.correct > previous.stats.correct
-        val reactionMillis = if (correct && round != null) (current.stats.reactionTotal - previous.stats.reactionTotal).coerceAtLeast(0L) else round?.deadlineMs ?: 0L
         val elapsed = (SystemClock.elapsedRealtime() - runStartedAt).coerceAtLeast(0L)
-        assistance.record(correct, reactionMillis)
+        assistance.recordResolution(resolution)
         _hintedAnomaly.value = null
         interference.objectResolved()?.let(::showInterferenceTransmission)
 
@@ -414,15 +414,14 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
                     if (preferences.echoDialogue && preferences.subtitles) echoMessage else null,
                     if (preferences.echoDialogue && preferences.subtitles) transmission else null,
                     hintedAnomaly,
-                    onAnswer = { anomaly ->
-                        if (preferences.haptics) {
-                            val correct = state.current?.isAnomaly == anomaly
-                            val semantic = if (correct) android.view.HapticFeedbackConstants.CONFIRM else android.view.HapticFeedbackConstants.REJECT
-                            val fallback = if (correct) android.view.HapticFeedbackConstants.KEYBOARD_TAP else android.view.HapticFeedbackConstants.LONG_PRESS
+                    onAnswer = { decisionId, anomaly ->
+                        val resolution = model.answer(decisionId, anomaly)
+                        if (resolution != null && preferences.haptics) {
+                            val semantic = if (resolution.correct) android.view.HapticFeedbackConstants.CONFIRM else android.view.HapticFeedbackConstants.REJECT
+                            val fallback = if (resolution.correct) android.view.HapticFeedbackConstants.KEYBOARD_TAP else android.view.HapticFeedbackConstants.LONG_PRESS
                             val effect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) semantic else fallback
                             if (!hostView.performHapticFeedback(effect)) hostView.performHapticFeedback(fallback)
                         }
-                        model.answer(anomaly)
                     }
                 )
                 state.finished -> ResultsScreen(model, state, best)
@@ -468,8 +467,9 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
     }
 }
 
-@Composable private fun GameScreen(s: GameState, echoMessage: DialogueMessage?, transmission: InterferenceTransmission?, hintedAnomaly: Boolean?, onAnswer: (Boolean)->Unit) {
+@Composable private fun GameScreen(s: GameState, echoMessage: DialogueMessage?, transmission: InterferenceTransmission?, hintedAnomaly: Boolean?, onAnswer: (Long, Boolean)->Unit) {
     val round=s.current; val rule=round?.ruleAtSpawn ?: s.rule
+    val decisionId=round?.decisionId
     val feedbackShake = remember { Animatable(0f) }
     LaunchedEffect(s.stats.total) {
         if (s.stats.total > 0 && s.lastCorrect == false) {
@@ -527,8 +527,8 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
         }
         Spacer(Modifier.height(12.dp))
         Row(Modifier.fillMaxWidth().height(116.dp), horizontalArrangement=Arrangement.spacedBy(12.dp)) {
-            DecisionZone("NORMAL", "FOLLOWS THE RULE", cyan, Modifier.weight(1f), hinted=hintedAnomaly == false, onClick={onAnswer(false)})
-            DecisionZone("ANOMALY", "BREAKS THE RULE", coral, Modifier.weight(1f), hinted=hintedAnomaly == true, onClick={onAnswer(true)})
+            DecisionZone("NORMAL", "FOLLOWS THE RULE", cyan, Modifier.weight(1f), hinted=hintedAnomaly == false, onClick={ decisionId?.let { onAnswer(it, false) } })
+            DecisionZone("ANOMALY", "BREAKS THE RULE", coral, Modifier.weight(1f), hinted=hintedAnomaly == true, onClick={ decisionId?.let { onAnswer(it, true) } })
         }
     }
 }
@@ -642,16 +642,18 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
 }
 
 @Composable private fun TutorialScreen(step:Int, next:()->Unit, skip:()->Unit) {
-    val rule=if(step==1) "REPEATING ORDER: CIRCLE → SQUARE → TRIANGLE" else "AFTER CIRCLE, EXPECT SQUARE"
+    val rule = OpeningTutorial.rule
     val targetAnomaly=step==2
+    val example = if (targetAnomaly) OpeningTutorial.anomalyExample else OpeningTutorial.normalExample
     Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment=Alignment.CenterHorizontally, verticalArrangement=Arrangement.SpaceBetween) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.End){Text("SKIP",color=muted,modifier=Modifier.clickable(onClick=skip).padding(12.dp))}
         Column(horizontalAlignment=Alignment.CenterHorizontally) {
             Text("QUICK CALIBRATION",color=cyan,fontSize=11.sp,letterSpacing=2.sp)
-            Text(if(step==1) "Learn the signal" else "Spot the break",color=white,fontSize=28.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=18.dp))
-            Text(rule,color=muted,fontSize=14.sp,modifier=Modifier.padding(top=12.dp))
-            Spacer(Modifier.height(70.dp)); ObjectGlyph(GameObject(if(targetAnomaly) Shape.TRIANGLE else Shape.CIRCLE, Hue.BLUE, 1), Modifier.size(150.dp), true)
-            Spacer(Modifier.height(40.dp)); Text("Tap ${if(targetAnomaly)"ANOMALY" else "NORMAL"} to continue",color=white,fontSize=17.sp)
+            Text(if(step==1) "Read the rule" else "Spot the break",color=white,fontSize=28.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=18.dp))
+            Text("ACTIVE RULE",color=muted,fontFamily=systemMono,fontSize=9.sp,letterSpacing=1.4.sp,modifier=Modifier.padding(top=14.dp))
+            Text(rule.playerInstruction(emptyList()).let(::instructionWithColorWords),color=cyan,fontSize=16.sp,fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(top=6.dp))
+            Spacer(Modifier.height(48.dp)); ObjectGlyph(example, Modifier.size(150.dp), true)
+            Spacer(Modifier.height(28.dp)); Text(if(targetAnomaly) "Coral breaks the rule. Tap ANOMALY." else "Blue follows the rule. Tap NORMAL.",color=white,fontSize=16.sp,textAlign=TextAlign.Center)
         }
         Row(Modifier.fillMaxWidth().height(100.dp),horizontalArrangement=Arrangement.spacedBy(12.dp)){
             DecisionZone("NORMAL","FOLLOWS THE RULE",cyan,Modifier.weight(1f)){if(!targetAnomaly)next()}
@@ -667,7 +669,7 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(14.dp)){
         Column(horizontalAlignment=Alignment.CenterHorizontally){Text(when { failure -> "SIGNAL LOST"; r.newBest -> "NEW PERSONAL BEST"; else -> "SESSION COMPLETE" },color=when { failure -> coral; r.newBest -> amber; else -> cyan },fontFamily=systemMono,fontSize=11.sp,letterSpacing=2.sp);Text("${r.score}",color=white,fontSize=58.sp,fontWeight=FontWeight.Black,modifier=Modifier.padding(top=10.dp));Text("POINTS",color=muted,fontFamily=systemMono,fontSize=10.sp,letterSpacing=2.sp)}
         Column(Modifier.fillMaxWidth().background(panel,RoundedCornerShape(20.dp)).padding(20.dp)){
-            ResultLine("ACCURACY","${r.accuracy}%");ResultLine("CORRECT CLASSIFICATIONS","${r.correct}");ResultLine("BEST COMBO","${s.stats.bestCombo}×");ResultLine("TRANSITIONS SURVIVED","${s.stats.transitions}");ResultLine("PERSONAL BEST","${r.best}")
+            ResultLine("ACCURACY","${r.accuracy}%");ResultLine("CORRECT CLASSIFICATIONS","${r.correct}");ResultLine("BEST COMBO","${s.stats.bestCombo}×");ResultLine("PROTOCOL CHANGES","${s.stats.transitions}");ResultLine("PERSONAL BEST","${r.best}")
         }
         if(finalDecision != null) FinalDecisionAnalysis(finalDecision)
         Column(Modifier.fillMaxWidth().padding(top=4.dp),horizontalAlignment=Alignment.CenterHorizontally){BigButton("PLAY AGAIN",cyan,model::playAgain);Text("HOME",color=muted,fontSize=12.sp,letterSpacing=2.sp,modifier=Modifier.clickable(onClick=model::home).padding(20.dp))}
