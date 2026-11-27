@@ -6,6 +6,8 @@ import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -27,9 +29,11 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -69,7 +73,7 @@ private val soundEffectsKey = soundKey
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val barColor = android.graphics.Color.rgb(9, 13, 22)
+        val barColor = android.graphics.Color.rgb(23, 28, 27)
         window.statusBarColor = barColor
         window.navigationBarColor = barColor
         window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(barColor))
@@ -267,17 +271,45 @@ private class ArcadeModel(private val context: android.content.Context) : ViewMo
 
     override fun onCleared() { audio.release(); super.onCleared() }
 }
-private val bg = Color(0xFF090D16); private val panel = Color(0xFF111927); private val muted = Color(0xFF8995A8); private val cyan = Color(0xFF54D7E8); private val coral = Color(0xFFFF626B); private val amber = Color(0xFFF4D64E); private val white = Color(0xFFEAF1FA); private val objectBlue = Color(0xFF4CA6FF); private val objectGreen = Color(0xFF55D18A)
+private val bg = Color(0xFF171C1B)
+private val bgSecondary = Color(0xFF202724)
+private val panel = Color(0xFF29332E)
+private val panelRaised = Color(0xFF313C36)
+private val border = Color(0xFF48534A)
+private val muted = Color(0xFF90998E)
+private val cyan = Color(0xFFA9B99A)
+private val coral = Color(0xFFB9655D)
+private val amber = Color(0xFFD0A15C)
+private val white = Color(0xFFC6C6B6)
+private val objectBlue = Color(0xFF79A8A3)
+private val objectGreen = Color(0xFFA9B99A)
+private val systemMono = FontFamily.Monospace
+
+private fun instructionWithColorWords(text: String): AnnotatedString = buildAnnotatedString {
+    append(text)
+    val names = listOf(
+        "blue" to objectBlue,
+        "green" to objectGreen,
+        "yellow" to amber,
+        "coral" to coral,
+        "red" to coral
+    )
+    names.forEach { (name, tint) ->
+        Regex("\\b${Regex.escape(name)}\\b", RegexOption.IGNORE_CASE).findAll(text).forEach { match ->
+            addStyle(SpanStyle(color = tint, fontWeight = FontWeight.Bold), match.range.first, match.range.last + 1)
+        }
+    }
+}
 
 @Composable private fun AnomalyApp() {
     val context = androidx.compose.ui.platform.LocalContext.current.applicationContext
+    val hostView = androidx.compose.ui.platform.LocalView.current
     val model: ArcadeModel = viewModel(factory = object : androidx.lifecycle.ViewModelProvider.Factory { @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T = ArcadeModel(context) as T })
     val state by model.state.collectAsState()
     val best by model.best.collectAsState()
     val preferences by model.preferences.collectAsState()
     val showBriefing by model.showBriefing.collectAsState()
     val echoMessage by model.echoMessage.collectAsState()
-    val feedback = LocalHapticFeedback.current
     MaterialTheme { Surface(Modifier.fillMaxSize(), color = bg) {
         Box(Modifier.fillMaxSize().safeDrawingPadding()) {
             when {
@@ -295,7 +327,16 @@ private val bg = Color(0xFF090D16); private val panel = Color(0xFF111927); priva
                 state.running -> GameScreen(
                     state,
                     if (preferences.echoDialogue && preferences.subtitles) echoMessage else null,
-                    onAnswer = { if (preferences.haptics) feedback.performHapticFeedback(HapticFeedbackType.TextHandleMove); model.answer(it) }
+                    onAnswer = { anomaly ->
+                        if (preferences.haptics) {
+                            val correct = state.current?.isAnomaly == anomaly
+                            val semantic = if (correct) android.view.HapticFeedbackConstants.CONFIRM else android.view.HapticFeedbackConstants.REJECT
+                            val fallback = if (correct) android.view.HapticFeedbackConstants.KEYBOARD_TAP else android.view.HapticFeedbackConstants.LONG_PRESS
+                            val effect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) semantic else fallback
+                            if (!hostView.performHapticFeedback(effect)) hostView.performHapticFeedback(fallback)
+                        }
+                        model.answer(anomaly)
+                    }
                 )
                 state.finished -> ResultsScreen(model, state, best)
                 state.tutorialStep in 1..2 -> TutorialScreen(state.tutorialStep, { if (state.tutorialStep == 2) model.tutorialComplete() else model.tutorialAdvance() }, model::skipTutorial)
@@ -342,35 +383,49 @@ private val bg = Color(0xFF090D16); private val panel = Color(0xFF111927); priva
 
 @Composable private fun GameScreen(s: GameState, echoMessage: DialogueMessage?, onAnswer: (Boolean)->Unit) {
     val round=s.current; val rule=round?.ruleAtSpawn ?: s.rule
+    val feedbackShake = remember { Animatable(0f) }
+    LaunchedEffect(s.stats.total) {
+        if (s.stats.total > 0 && s.lastCorrect == false) {
+            // A tiny, brief nudge signals a mistake without flashing or moving the object.
+            feedbackShake.snapTo(0f)
+            feedbackShake.animateTo(1.5f, tween(45))
+            feedbackShake.animateTo(-1.5f, tween(45))
+            feedbackShake.animateTo(0f, tween(45))
+        }
+    }
+    val ruleChanged = s.message == "PATTERN SHIFT"
     Column(Modifier.fillMaxSize().padding(horizontal=20.dp, vertical=12.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment=Alignment.CenterVertically, horizontalArrangement=Arrangement.SpaceBetween) {
-            Column { Text("SCORE", color=muted, fontSize=10.sp, letterSpacing=1.5.sp); Text("${s.stats.score}", color=white, fontSize=24.sp, fontWeight=FontWeight.Bold) }
-            Column(horizontalAlignment=Alignment.CenterHorizontally) { Text("${(s.remainingMs/1000f).let { String.format("%.1f",it) }}", color=if(s.remainingMs<10000)coral else white, fontSize=26.sp, fontWeight=FontWeight.Bold); Text("SEC", color=muted, fontSize=9.sp) }
-            Row { repeat(3) { i -> Text(if (i < s.integrity) "◆" else "◇", color=if(i<s.integrity)coral else muted, fontSize=17.sp, modifier=Modifier.padding(2.dp)) } }
+            Column { Text("SCORE", color=muted, fontFamily=systemMono, fontSize=10.sp, letterSpacing=1.5.sp); val score by androidx.compose.animation.core.animateIntAsState(s.stats.score, tween(320), label="score"); Text("$score", color=white, fontFamily=systemMono, fontSize=24.sp, fontWeight=FontWeight.Bold) }
+            Column(horizontalAlignment=Alignment.CenterHorizontally) { Text("${(s.remainingMs/1000f).let { String.format("%.1f",it) }}", color=if(s.remainingMs<10000)coral else white, fontFamily=systemMono, fontSize=26.sp, fontWeight=FontWeight.Bold); Text("SEC", color=muted, fontFamily=systemMono, fontSize=9.sp) }
+            Row(verticalAlignment=Alignment.CenterVertically) { Text("INT", color=muted, fontFamily=systemMono, fontSize=9.sp, modifier=Modifier.padding(end=4.dp)); repeat(3) { i -> val alive=i<s.integrity; val tint by androidx.compose.animation.animateColorAsState(if(alive) (if(s.integrity==1) amber else cyan) else border, tween(260), label="integrity-$i"); Text(if(alive) "◆" else "◇", color=tint, fontSize=17.sp, modifier=Modifier.padding(2.dp)) } }
         }
         Spacer(Modifier.height(12.dp))
-        Column(Modifier.fillMaxWidth().background(panel, RoundedCornerShape(14.dp)).padding(horizontal=14.dp, vertical=12.dp)) {
-            Text("ACTIVE RULE", color=muted, fontSize=9.sp, letterSpacing=1.7.sp)
-            Text(rule?.playerInstruction(s.history) ?: "Calibrating…", color=cyan, fontSize=14.sp, lineHeight=18.sp, fontWeight=FontWeight.SemiBold, maxLines=3, modifier=Modifier.padding(top=4.dp))
+        Column(Modifier.fillMaxWidth().background(panelRaised, RoundedCornerShape(14.dp)).border(1.dp, if(ruleChanged) amber.copy(alpha=.42f) else border.copy(alpha=.55f), RoundedCornerShape(14.dp)).padding(horizontal=14.dp, vertical=12.dp)) {
+            Text("ACTIVE RULE", color=muted, fontFamily=systemMono, fontSize=9.sp, letterSpacing=1.7.sp)
+            Text(rule?.playerInstruction(s.history)?.let(::instructionWithColorWords) ?: AnnotatedString("Calibrating…"), color=cyan, fontSize=14.sp, lineHeight=18.sp, fontWeight=FontWeight.SemiBold, maxLines=3, modifier=Modifier.padding(top=4.dp))
         }
         Row(Modifier.fillMaxWidth().padding(top=12.dp), horizontalArrangement=Arrangement.SpaceBetween, verticalAlignment=Alignment.CenterVertically) {
-            Text("RECENT", color=muted, fontSize=9.sp, letterSpacing=1.5.sp)
+            Text("RECENT", color=muted, fontFamily=systemMono, fontSize=9.sp, letterSpacing=1.5.sp)
             Row(horizontalArrangement=Arrangement.spacedBy(7.dp)) { s.history.takeLast(5).forEach { ObjectGlyph(it, Modifier.size(26.dp)) } }
         }
         Spacer(Modifier.height(8.dp))
-        Box(Modifier.weight(1f).fillMaxWidth().background(Brush.verticalGradient(listOf(Color(0xFF0D1522), bg)), RoundedCornerShape(24.dp)), contentAlignment=Alignment.Center) {
-            if(round!=null) ObjectGlyph(round.item, Modifier.size(190.dp), glow=true)
+        Box(Modifier.weight(1f).fillMaxWidth().offset(x=feedbackShake.value.dp).background(Brush.verticalGradient(listOf(bgSecondary, bg)), RoundedCornerShape(20.dp)).border(1.dp, if(s.integrity==1) amber.copy(alpha=.6f) else border.copy(alpha=.55f), RoundedCornerShape(20.dp)), contentAlignment=Alignment.Center) {
+            Canvas(Modifier.fillMaxSize()) {
+                var y=6.dp.toPx(); while(y<size.height) { drawLine(white.copy(alpha=.018f), Offset(0f,y), Offset(size.width,y), 1.dp.toPx()); y+=6.dp.toPx() }
+            }
+            if(round!=null) ObjectGlyph(round.item, Modifier.size(190.dp).offset(y=12.dp))
             Column(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(horizontal=12.dp, vertical=12.dp), horizontalAlignment=Alignment.CenterHorizontally) {
                 when (s.message) {
                     "SYSTEM ALERT · PATTERN SHIFT NEXT" -> Text("PATTERN SHIFT NEXT", color=amber, fontSize=10.sp, fontWeight=FontWeight.Black, letterSpacing=1.7.sp, modifier=Modifier.background(amber.copy(alpha=.12f), RoundedCornerShape(20.dp)).padding(horizontal=13.dp, vertical=7.dp))
                     "PATTERN SHIFT" -> Text("RULE UPDATED", color=amber, fontSize=10.sp, fontWeight=FontWeight.Black, letterSpacing=1.7.sp, modifier=Modifier.background(amber.copy(alpha=.16f), RoundedCornerShape(20.dp)).padding(horizontal=13.dp, vertical=7.dp))
                     else -> if(s.message.isNotBlank()) Text(s.message, color=if(s.lastCorrect==false)coral else amber, fontSize=11.sp, fontWeight=FontWeight.Bold, letterSpacing=2.sp)
                 }
-                Text(rule?.focusCue(s.history) ?: "READ THE ACTIVE RULE", color=cyan, fontSize=14.sp, fontWeight=FontWeight.Bold, textAlign=TextAlign.Center, maxLines=2, modifier=Modifier.padding(top=6.dp))
-                if(s.stats.combo>=3) Text("${s.stats.combo}× COMBO", color=muted, fontSize=10.sp, letterSpacing=1.6.sp, modifier=Modifier.padding(top=4.dp))
+                Text(rule?.focusCue(s.history)?.let(::instructionWithColorWords) ?: AnnotatedString("READ THE ACTIVE RULE"), color=cyan, fontSize=14.sp, fontWeight=FontWeight.Bold, textAlign=TextAlign.Center, maxLines=2, modifier=Modifier.padding(top=6.dp))
+                if(s.stats.combo>=3) Text("${s.stats.combo}× COMBO${if(s.stats.combo>=5) "  ·  MULTIPLIER" else if(s.stats.combo==3) "  ·  STREAK" else ""}", color=cyan, fontFamily=systemMono, fontSize=10.sp, letterSpacing=1.2.sp, modifier=Modifier.padding(top=4.dp))
             }
+            EchoDialogueOverlay(echoMessage, Modifier.align(Alignment.BottomCenter).padding(horizontal=10.dp, vertical=10.dp))
         }
-        EchoDialogueOverlay(echoMessage)
         Spacer(Modifier.height(12.dp))
         Row(Modifier.fillMaxWidth().height(116.dp), horizontalArrangement=Arrangement.spacedBy(12.dp)) {
             DecisionZone("NORMAL", "FOLLOWS THE RULE", cyan, Modifier.weight(1f), onClick={onAnswer(false)})
@@ -379,8 +434,9 @@ private val bg = Color(0xFF090D16); private val panel = Color(0xFF111927); priva
     }
 }
 
-@Composable private fun EchoDialogueOverlay(message: DialogueMessage?) {
+@Composable private fun EchoDialogueOverlay(message: DialogueMessage?, modifier: Modifier = Modifier) {
     AnimatedVisibility(
+        modifier = modifier,
         visible = message != null,
         enter = fadeIn() + slideInVertically(initialOffsetY = { it / 3 }),
         exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 3 })
@@ -389,14 +445,14 @@ private val bg = Color(0xFF090D16); private val panel = Color(0xFF111927); priva
         if (current != null) {
             Row(
                 Modifier.fillMaxWidth()
-                    .background(Color(0xD90B111C), RoundedCornerShape(12.dp))
-                    .border(1.dp, cyan.copy(alpha = .2f), RoundedCornerShape(12.dp))
+                    .background(panelRaised.copy(alpha=.96f), RoundedCornerShape(12.dp))
+                    .border(1.dp, cyan.copy(alpha = .25f), RoundedCornerShape(12.dp))
                     .padding(horizontal = 12.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(Modifier.size(6.dp).background(cyan, RoundedCornerShape(50)))
                 Column(Modifier.padding(start = 10.dp)) {
-                    Text("ECHO  ·  SECURE CHANNEL", color = cyan, fontSize = 8.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.3.sp)
+                    Text("ECHO  ·  SECURE CHANNEL", color = cyan, fontFamily=systemMono, fontSize = 8.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.3.sp)
                     Text(current.text, color = white, fontSize = 11.sp, lineHeight = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
             }
@@ -413,15 +469,15 @@ private val bg = Color(0xFF090D16); private val panel = Color(0xFF111927); priva
 @Composable private fun ObjectGlyph(item: GameObject, modifier: Modifier, glow:Boolean=false) {
     val color=when(item.hue){Hue.CORAL->coral;Hue.BLUE->objectBlue;Hue.YELLOW->amber;Hue.GREEN->objectGreen}
     Canvas(modifier) {
-        val unit=size.minDimension*.52f; val left=(size.width-unit)/2; val top=(size.height-unit)/2; val center=Offset(size.width/2,size.height/2)
-        if(glow) drawCircle(color.copy(alpha=.12f),unit*.84f,center)
+        val unit=size.minDimension*.64f; val left=(size.width-unit)/2; val top=(size.height-unit)/2; val center=Offset(size.width/2,size.height/2)
+        if(glow) drawCircle(color.copy(alpha=.06f),unit*.78f,center)
         when(item.shape){
-            Shape.CIRCLE->drawCircle(color,unit*.48f,center)
-            Shape.SQUARE->drawRoundRect(color,Offset(left,top),Size(unit,unit),androidx.compose.ui.geometry.CornerRadius(unit*.09f))
-            Shape.TRIANGLE->{val p=Path().apply{moveTo(center.x,top);lineTo(left+unit,top+unit*.88f);lineTo(left,top+unit*.88f);close()};drawPath(p,color)}
+            Shape.CIRCLE->{drawCircle(color,unit*.46f,center);drawCircle(white.copy(alpha=.16f),unit*.46f,center,style=Stroke(width=1.5.dp.toPx()))}
+            Shape.SQUARE->{drawRoundRect(color,Offset(left,top),Size(unit,unit),androidx.compose.ui.geometry.CornerRadius(unit*.06f));drawRoundRect(white.copy(alpha=.16f),Offset(left,top),Size(unit,unit),androidx.compose.ui.geometry.CornerRadius(unit*.06f),style=Stroke(width=1.5.dp.toPx()))}
+            Shape.TRIANGLE->{val p=Path().apply{moveTo(center.x,top);lineTo(left+unit,top+unit*.88f);lineTo(left,top+unit*.88f);close()};drawPath(p,color);drawPath(p,white.copy(alpha=.16f),style=Stroke(width=1.5.dp.toPx()))}
         }
-        val count=item.dots.coerceIn(0,3); val dot=size.minDimension*.042f
-        if(count>0){val positions=when(count){1->listOf(Offset(center.x,center.y));2->listOf(Offset(center.x-dot*1.8f,center.y),Offset(center.x+dot*1.8f,center.y));else->listOf(Offset(center.x,center.y-dot*1.8f),Offset(center.x-dot*1.7f,center.y+dot*1.2f),Offset(center.x+dot*1.7f,center.y+dot*1.2f))}; positions.forEach{drawCircle(bg,dot,it)}}
+        val count=item.dots.coerceIn(0,3)
+        if(count>0){val step=unit*.35f/2.6f;val dot=minOf(size.minDimension*.044f,step*.31f);val positions=when(count){1->listOf(Offset(center.x,center.y));2->listOf(Offset(center.x-step,center.y),Offset(center.x+step,center.y));else->listOf(Offset(center.x,center.y-step*.72f),Offset(center.x-step,center.y+step*.68f),Offset(center.x+step,center.y+step*.68f))};positions.forEach{p->drawCircle(bg,dot*1.45f,p);drawCircle(bg.copy(alpha=.88f),dot,p)}}
     }
 }
 
