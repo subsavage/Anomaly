@@ -11,6 +11,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -226,8 +228,6 @@ private class ArcadeModel(private val context: android.content.Context) : ViewMo
             if (current.stats.transitions >= 3 && !unusualSignalNotified) {
                 unusualSignalNotified = true
                 sendDialogue(DialogueEvent.UNUSUAL_SYSTEM)
-            } else {
-                sendDialogue(DialogueEvent.PATTERN_TRANSITION)
             }
         }
         if (current.current != null) {
@@ -480,7 +480,16 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
             feedbackShake.animateTo(0f, tween(45))
         }
     }
-    val ruleChanged = s.message == "PATTERN SHIFT"
+    val transitionApproaching = s.message == "SYSTEM ALERT · PATTERN SHIFT NEXT"
+    var protocolUpdateVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(s.stats.transitions) {
+        if (s.stats.transitions > 0) {
+            protocolUpdateVisible = true
+            delay(1_700L)
+            protocolUpdateVisible = false
+        }
+    }
+    val transitionEmphasis = transitionApproaching || protocolUpdateVisible
     Column(Modifier.fillMaxSize().padding(horizontal=20.dp, vertical=12.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment=Alignment.CenterVertically, horizontalArrangement=Arrangement.SpaceBetween) {
             Column { Text("SCORE", color=muted, fontFamily=systemMono, fontSize=10.sp, letterSpacing=1.5.sp); val score by androidx.compose.animation.core.animateIntAsState(s.stats.score, tween(320), label="score"); Text("$score", color=white, fontFamily=systemMono, fontSize=24.sp, fontWeight=FontWeight.Bold) }
@@ -488,8 +497,14 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
             Row(verticalAlignment=Alignment.CenterVertically) { Text("INT", color=muted, fontFamily=systemMono, fontSize=9.sp, modifier=Modifier.padding(end=4.dp)); repeat(3) { i -> val alive=i<s.integrity; val tint by androidx.compose.animation.animateColorAsState(if(alive) (if(s.integrity==1) amber else cyan) else border, tween(260), label="integrity-$i"); Text(if(alive) "◆" else "◇", color=tint, fontSize=17.sp, modifier=Modifier.padding(2.dp)) } }
         }
         Spacer(Modifier.height(12.dp))
-        Column(Modifier.fillMaxWidth().background(panelRaised, RoundedCornerShape(14.dp)).border(1.dp, if(ruleChanged) amber.copy(alpha=.42f) else border.copy(alpha=.55f), RoundedCornerShape(14.dp)).padding(horizontal=14.dp, vertical=12.dp)) {
-            Text("ACTIVE RULE", color=muted, fontFamily=systemMono, fontSize=9.sp, letterSpacing=1.7.sp)
+        Column(Modifier.fillMaxWidth().background(panelRaised, RoundedCornerShape(14.dp)).border(1.dp, if(transitionEmphasis) amber.copy(alpha=.5f) else border.copy(alpha=.55f), RoundedCornerShape(14.dp)).padding(horizontal=14.dp, vertical=12.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.SpaceBetween, verticalAlignment=Alignment.CenterVertically) {
+                Text("ACTIVE RULE", color=muted, fontFamily=systemMono, fontSize=9.sp, letterSpacing=1.7.sp)
+                when {
+                    transitionApproaching -> Text("TRANSITION NEXT", color=amber, fontFamily=systemMono, fontSize=8.sp, fontWeight=FontWeight.Bold, letterSpacing=.7.sp, modifier=Modifier.background(amber.copy(alpha=.12f), RoundedCornerShape(8.dp)).padding(horizontal=7.dp, vertical=4.dp))
+                    protocolUpdateVisible -> Text("NEW PROTOCOL ACTIVE", color=amber, fontFamily=systemMono, fontSize=8.sp, fontWeight=FontWeight.Bold, letterSpacing=.7.sp, modifier=Modifier.background(amber.copy(alpha=.12f), RoundedCornerShape(8.dp)).padding(horizontal=7.dp, vertical=4.dp))
+                }
+            }
             Text(rule?.playerInstruction(s.history)?.let(::instructionWithColorWords) ?: AnnotatedString("Calibrating…"), color=cyan, fontSize=14.sp, lineHeight=18.sp, fontWeight=FontWeight.SemiBold, maxLines=3, modifier=Modifier.padding(top=4.dp))
         }
         Row(Modifier.fillMaxWidth().padding(top=12.dp), horizontalArrangement=Arrangement.SpaceBetween, verticalAlignment=Alignment.CenterVertically) {
@@ -497,7 +512,7 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
             Row(horizontalArrangement=Arrangement.spacedBy(7.dp)) { s.history.takeLast(5).forEach { ObjectGlyph(it, Modifier.size(26.dp)) } }
         }
         Spacer(Modifier.height(8.dp))
-        EchoCommunicationPanel(echoMessage, transmission, Modifier.fillMaxWidth())
+        EchoCommunicationPanel(echoMessage?.takeUnless { it.event == DialogueEvent.PATTERN_TRANSITION }, transmission, Modifier.fillMaxWidth())
         Spacer(Modifier.height(8.dp))
         Box(Modifier.weight(1f).fillMaxWidth().offset(x=feedbackShake.value.dp).background(Brush.verticalGradient(listOf(bgSecondary, bg)), RoundedCornerShape(20.dp)).border(1.dp, if(s.integrity==1) amber.copy(alpha=.6f) else border.copy(alpha=.55f), RoundedCornerShape(20.dp)), contentAlignment=Alignment.Center) {
             Canvas(Modifier.fillMaxSize()) {
@@ -505,11 +520,7 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
             }
             if(round!=null) ObjectGlyph(round.item, Modifier.size(190.dp).offset(y=12.dp))
             Column(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(horizontal=12.dp, vertical=12.dp), horizontalAlignment=Alignment.CenterHorizontally) {
-                when (s.message) {
-                    "SYSTEM ALERT · PATTERN SHIFT NEXT" -> Text("PATTERN SHIFT NEXT", color=amber, fontSize=10.sp, fontWeight=FontWeight.Black, letterSpacing=1.7.sp, modifier=Modifier.background(amber.copy(alpha=.12f), RoundedCornerShape(20.dp)).padding(horizontal=13.dp, vertical=7.dp))
-                    "PATTERN SHIFT" -> Text("RULE UPDATED", color=amber, fontSize=10.sp, fontWeight=FontWeight.Black, letterSpacing=1.7.sp, modifier=Modifier.background(amber.copy(alpha=.16f), RoundedCornerShape(20.dp)).padding(horizontal=13.dp, vertical=7.dp))
-                    else -> if(s.message.isNotBlank()) Text(s.message, color=if(s.lastCorrect==false)coral else amber, fontSize=11.sp, fontWeight=FontWeight.Bold, letterSpacing=2.sp)
-                }
+                if(s.message.isNotBlank() && s.message != "SYSTEM ALERT · PATTERN SHIFT NEXT" && s.message != "PATTERN SHIFT") Text(s.message, color=if(s.lastCorrect==false)coral else amber, fontSize=11.sp, fontWeight=FontWeight.Bold, letterSpacing=2.sp)
                 Text(rule?.focusCue(s.history)?.let(::instructionWithColorWords) ?: AnnotatedString("READ THE ACTIVE RULE"), color=cyan, fontSize=14.sp, fontWeight=FontWeight.Bold, textAlign=TextAlign.Center, maxLines=2, modifier=Modifier.padding(top=6.dp))
                 if(s.stats.combo>=3) Text("${s.stats.combo}× COMBO${if(s.stats.combo>=5) "  ·  MULTIPLIER" else if(s.stats.combo==3) "  ·  STREAK" else ""}", color=cyan, fontFamily=systemMono, fontSize=10.sp, letterSpacing=1.2.sp, modifier=Modifier.padding(top=4.dp))
             }
@@ -651,14 +662,64 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
 
 @Composable private fun ResultsScreen(model:ArcadeModel,s:GameState,best:Int){
     val r=remember(s.stats,best){GameSessionEngine().let { GameResult(s.stats.score, maxOf(best,s.stats.score),if(s.stats.total==0)0 else s.stats.correct*100/s.stats.total,s.stats.correct,s.stats.bestCombo,s.stats.transitions,s.stats.score>best) }}
-    Column(Modifier.fillMaxSize().padding(24.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.SpaceBetween){
-        Spacer(Modifier.height(8.dp)); Column(horizontalAlignment=Alignment.CenterHorizontally){Text(if(r.newBest)"NEW PERSONAL BEST" else "SESSION COMPLETE",color=if(r.newBest)amber else cyan,fontSize=11.sp,letterSpacing=2.sp);Text("${r.score}",color=white,fontSize=58.sp,fontWeight=FontWeight.Black,modifier=Modifier.padding(top=10.dp));Text("POINTS",color=muted,fontSize=10.sp,letterSpacing=2.sp)}
+    val failure = s.endReason == RunEndReason.INTEGRITY_DEPLETED
+    val finalDecision = s.decisionHistory.lastOrNull().takeIf { failure }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(14.dp)){
+        Column(horizontalAlignment=Alignment.CenterHorizontally){Text(when { failure -> "SIGNAL LOST"; r.newBest -> "NEW PERSONAL BEST"; else -> "SESSION COMPLETE" },color=when { failure -> coral; r.newBest -> amber; else -> cyan },fontFamily=systemMono,fontSize=11.sp,letterSpacing=2.sp);Text("${r.score}",color=white,fontSize=58.sp,fontWeight=FontWeight.Black,modifier=Modifier.padding(top=10.dp));Text("POINTS",color=muted,fontFamily=systemMono,fontSize=10.sp,letterSpacing=2.sp)}
         Column(Modifier.fillMaxWidth().background(panel,RoundedCornerShape(20.dp)).padding(20.dp)){
             ResultLine("ACCURACY","${r.accuracy}%");ResultLine("CORRECT CLASSIFICATIONS","${r.correct}");ResultLine("BEST COMBO","${s.stats.bestCombo}×");ResultLine("TRANSITIONS SURVIVED","${s.stats.transitions}");ResultLine("PERSONAL BEST","${r.best}")
         }
-        Column(horizontalAlignment=Alignment.CenterHorizontally){BigButton("PLAY AGAIN",cyan,model::playAgain);Text("HOME",color=muted,fontSize=12.sp,letterSpacing=2.sp,modifier=Modifier.clickable(onClick=model::home).padding(20.dp))}
+        if(finalDecision != null) FinalDecisionAnalysis(finalDecision)
+        Column(Modifier.fillMaxWidth().padding(top=4.dp),horizontalAlignment=Alignment.CenterHorizontally){BigButton("PLAY AGAIN",cyan,model::playAgain);Text("HOME",color=muted,fontSize=12.sp,letterSpacing=2.sp,modifier=Modifier.clickable(onClick=model::home).padding(20.dp))}
     }
 }
+
+@Composable private fun FinalDecisionAnalysis(decision: DecisionContext) {
+    Column(Modifier.fillMaxWidth().background(bgSecondary,RoundedCornerShape(18.dp)).border(1.dp,coral.copy(alpha=.55f),RoundedCornerShape(18.dp)).padding(16.dp)) {
+        Text("FINAL DECISION ANALYSIS",color=coral,fontFamily=systemMono,fontSize=10.sp,fontWeight=FontWeight.Bold,letterSpacing=1.3.sp)
+        Text("ACTIVE PROTOCOL",color=muted,fontFamily=systemMono,fontSize=8.sp,letterSpacing=1.1.sp,modifier=Modifier.padding(top=14.dp))
+        Text(decision.activeRuleDescription,color=cyan,fontSize=14.sp,fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(top=4.dp))
+
+        Row(Modifier.fillMaxWidth().padding(top=12.dp),verticalAlignment=Alignment.CenterVertically) {
+            ObjectGlyph(decision.item,Modifier.size(74.dp))
+            Column(Modifier.padding(start=12.dp)) {
+                Text("INCOMING OBJECT",color=muted,fontFamily=systemMono,fontSize=8.sp,letterSpacing=1.sp)
+                val shape=decision.item.shape.name.lowercase().replaceFirstChar(Char::uppercase)
+                val hue=decision.item.hue.name.lowercase().replaceFirstChar(Char::uppercase)
+                Text("$shape · $hue · ${decision.item.dots} ${if(decision.item.dots==1) "DOT" else "DOTS"}",color=white,fontSize=11.sp,fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(top=4.dp))
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        ResultLine("YOUR LAST DECISION",when {
+            decision.timedOut && decision.playerAnomaly == null -> "TIMEOUT · NO RESPONSE"
+            decision.lateResponse -> "LATE · ${decision.playerAnomaly?.toDecisionLabel()}"
+            else -> decision.playerAnomaly?.toDecisionLabel() ?: "NO RESPONSE"
+        })
+        ResultLine("CORRECT CLASSIFICATION",decision.correctAnomaly.toDecisionLabel())
+        Text(decision.explanation,color=white,fontSize=12.sp,lineHeight=17.sp,modifier=Modifier.padding(top=4.dp))
+
+        if(decision.recentTransition && decision.previousRule != null && decision.newRule != null) {
+            Column(Modifier.fillMaxWidth().padding(top=14.dp).background(panel,RoundedCornerShape(12.dp)).padding(12.dp)) {
+                Text("RECENT PROTOCOL CHANGE",color=amber,fontFamily=systemMono,fontSize=8.sp,fontWeight=FontWeight.Bold,letterSpacing=1.sp)
+                Text("PREVIOUS PROTOCOL",color=muted,fontFamily=systemMono,fontSize=8.sp,letterSpacing=.8.sp,modifier=Modifier.padding(top=8.dp))
+                Text(decision.previousRuleDescription ?: decision.previousRule.label,color=white,fontSize=11.sp,modifier=Modifier.padding(top=3.dp))
+                Text("NEW PROTOCOL",color=amber,fontFamily=systemMono,fontSize=8.sp,letterSpacing=.8.sp,modifier=Modifier.padding(top=8.dp))
+                Text(decision.newRuleDescription ?: decision.newRule.label,color=cyan,fontSize=11.sp,modifier=Modifier.padding(top=3.dp))
+            }
+        }
+
+        val echoObservation = when {
+            decision.recentTransition -> "The protocol had just changed. Check the active rule above."
+            decision.timedOut -> "The signal expired before you answered."
+            decision.lateResponse -> "Your selection arrived after the response window closed."
+            else -> null
+        }
+        if(echoObservation != null) Text("ECHO  /  $echoObservation",color=cyan,fontSize=10.sp,lineHeight=14.sp,modifier=Modifier.padding(top=12.dp))
+    }
+}
+
+private fun Boolean.toDecisionLabel(): String = if(this) "ANOMALY" else "NORMAL"
 
 @Composable private fun ResultLine(label:String,value:String){Row(Modifier.fillMaxWidth().padding(vertical=8.dp),horizontalArrangement=Arrangement.SpaceBetween){Text(label,color=muted,fontSize=10.sp,letterSpacing=1.sp);Text(value,color=white,fontWeight=FontWeight.Bold,fontSize=13.sp)}}
 @Composable private fun SettingsScreen(
