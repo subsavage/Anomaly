@@ -4,8 +4,14 @@ import android.os.Bundle
 import android.os.Build
 import android.os.SystemClock
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -25,7 +31,9 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.AnnotatedString
@@ -168,7 +176,8 @@ private class ArcadeModel(private val context: android.content.Context) : ViewMo
         _state.value = engine.state
         viewModelScope.launch {
             while (engine.state.running) {
-                delay(50)
+                delay(if (engine.state.paused) 250 else 50)
+                if (engine.state.paused) continue
                 val previous = engine.state
                 val resolution = engine.tick()
                 val current = engine.state
@@ -338,8 +347,20 @@ private class ArcadeModel(private val context: android.content.Context) : ViewMo
 
     fun toggleSettings() { _state.value = _state.value.copy(settings = !_state.value.settings) }
     fun home() { _state.value = GameState(best = best.value) }
+    fun pauseRun() { engine.pause(); _state.value = engine.state }
+    fun resumeRun() { engine.resume(); _state.value = engine.state }
+    fun abandonRun() {
+        runGeneration++
+        runFinishedPersisted = true
+        engine.abort()
+        _state.value = engine.state
+        _echoMessage.value = null
+        _transmission.value = null
+        _hintedAnomaly.value = null
+    }
     fun tutorialComplete() { requestPlay() }
     fun tutorialAdvance() { _state.value = _state.value.copy(tutorialStep = _state.value.tutorialStep + 1) }
+    fun tutorialBack() { _state.value = _state.value.copy(tutorialStep = (_state.value.tutorialStep - 1).coerceAtLeast(0)) }
     fun skipTutorial() { _state.value = _state.value.copy(tutorialStep = 3) }
 
     fun setEchoDialogue(value: Boolean) { updatePreference(echoDialogueKey, value); if (!value) clearDialogue() }
@@ -395,6 +416,16 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
     val echoMessage by model.echoMessage.collectAsState()
     val transmission by model.transmission.collectAsState()
     val hintedAnomaly by model.hintedAnomaly.collectAsState()
+    BackHandler(enabled = showBriefing || state.settings || state.running || state.finished || state.tutorialStep in 1..2) {
+        when {
+            showBriefing -> model.closeBriefing()
+            state.settings -> model.toggleSettings()
+            state.running && state.paused -> model.resumeRun()
+            state.running -> model.pauseRun()
+            state.finished -> model.home()
+            state.tutorialStep in 1..2 -> model.tutorialBack()
+        }
+    }
     MaterialTheme { Surface(Modifier.fillMaxSize(), color = bg) {
         Box(Modifier.fillMaxSize().safeDrawingPadding()) {
             when {
@@ -428,8 +459,22 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
                 state.tutorialStep in 1..2 -> TutorialScreen(state.tutorialStep, { if (state.tutorialStep == 2) model.tutorialComplete() else model.tutorialAdvance() }, model::skipTutorial)
                 else -> HomeScreen(best, model::requestPlay, model::toggleSettings, model::tutorialAdvance)
             }
+            if (state.paused) PauseScreen(model::resumeRun, model::abandonRun)
         }
     } }
+}
+@Composable private fun PauseScreen(resume: () -> Unit, abandon: () -> Unit) {
+    Column(
+        Modifier.fillMaxSize().background(bg.copy(alpha = .96f)).padding(horizontal = 28.dp, vertical = 32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text("OPERATION PAUSED", color = cyan, fontFamily = systemMono, fontSize = 12.sp, letterSpacing = 2.sp)
+        Text("Your signal is held.", color = muted, fontSize = 14.sp, modifier = Modifier.padding(top = 12.dp, bottom = 32.dp))
+        BigButton("RESUME", cyan, resume)
+        Text("ABANDON RUN", color = muted, fontSize = 12.sp, letterSpacing = 1.5.sp, modifier = Modifier.clickable(onClick = abandon).padding(22.dp))
+        Text("BACK TO RESUME", color = muted.copy(alpha = .7f), fontSize = 9.sp, letterSpacing = 1.sp)
+    }
 }
 @Composable private fun MissionBriefingScreen(operation: com.anomaly.game.narrative.OperationMetadata, beginLabel: String, begin: () -> Unit, back: () -> Unit) {
     Column(Modifier.fillMaxSize().padding(horizontal = 22.dp, vertical = 18.dp), verticalArrangement = Arrangement.SpaceBetween) {
@@ -452,11 +497,59 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
         }
     }
 }
+@Composable private fun AnimatedHomeLogo() {
+    val transition = rememberInfiniteTransition(label = "home-logo")
+    val circleRotation = transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(240_000, easing = LinearEasing), repeatMode = RepeatMode.Restart),
+        label = "home-logo-circle"
+    )
+    val squareRotation = transition.animateFloat(
+        initialValue = 0f,
+        targetValue = -360f,
+        animationSpec = infiniteRepeatable(tween(18_000, easing = LinearEasing), repeatMode = RepeatMode.Restart),
+        label = "home-logo-square"
+    )
+    val triangleRotation = transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(24_000, easing = LinearEasing), repeatMode = RepeatMode.Restart),
+        label = "home-logo-triangle"
+    )
+
+    Box(Modifier.size(150.dp)) {
+        Canvas(Modifier.fillMaxSize().graphicsLayer { rotationZ = circleRotation.value }) {
+            drawCircle(cyan.copy(alpha = .9f), radius = size.minDimension * .34f, style = Stroke(3.dp.toPx()))
+        }
+        Canvas(Modifier.fillMaxSize().graphicsLayer { rotationZ = squareRotation.value }) {
+            drawRect(
+                cyan.copy(alpha = .26f),
+                topLeft = Offset(size.width * .28f, size.height * .28f),
+                size = Size(size.width * .44f, size.height * .44f),
+                style = Stroke(3.dp.toPx())
+            )
+        }
+        Canvas(Modifier.fillMaxSize().graphicsLayer {
+            rotationZ = triangleRotation.value
+            transformOrigin = TransformOrigin(.5f, .56f)
+        }) {
+            val path = Path().apply {
+                moveTo(size.width * .5f, size.height * .08f)
+                lineTo(size.width * .88f, size.height * .8f)
+                lineTo(size.width * .12f, size.height * .8f)
+                close()
+            }
+            drawPath(path, cyan.copy(alpha = .32f), style = Stroke(3.dp.toPx()))
+        }
+    }
+}
+
 @Composable private fun HomeScreen(best: Int, play: () -> Unit, settings: () -> Unit, tutorial: () -> Unit) {
     Column(Modifier.fillMaxSize().padding(horizontal = 26.dp, vertical = 30.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.SpaceBetween) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { Text("⚙", color = muted, fontSize = 24.sp, modifier = Modifier.clickable(onClick = settings).padding(8.dp)) }
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Canvas(Modifier.size(150.dp)) { drawCircle(cyan.copy(alpha = .9f), radius = size.minDimension * .34f, style = Stroke(3.dp.toPx())); drawRect(cyan.copy(alpha = .26f), topLeft = Offset(size.width*.28f,size.height*.28f), size = Size(size.width*.44f,size.height*.44f), style = Stroke(3.dp.toPx())); val path=Path().apply { moveTo(size.width*.5f,size.height*.08f); lineTo(size.width*.88f,size.height*.8f); lineTo(size.width*.12f,size.height*.8f); close() }; drawPath(path, cyan.copy(alpha=.32f), style=Stroke(3.dp.toPx())) }
+            AnimatedHomeLogo()
             Spacer(Modifier.height(24.dp)); Text("ANOMALY", color=white, fontSize=34.sp, fontWeight=FontWeight.Black, letterSpacing=5.sp); Text("READ THE SIGNAL. FIND THE BREAK.", color=muted, fontSize=11.sp, letterSpacing=2.sp, modifier=Modifier.padding(top=10.dp))
         }
         Column(horizontalAlignment=Alignment.CenterHorizontally) {

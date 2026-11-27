@@ -33,6 +33,25 @@ class GameEngineTest {
     @Test fun scoringMultipliersFollowComboMilestones() { assertEquals(100,ScoringEngine.points(1)); assertEquals(120,ScoringEngine.points(3)); assertEquals(150,ScoringEngine.points(5)); assertEquals(200,ScoringEngine.points(8)) }
     @Test fun difficultyStaysBounded() { val engine=DifficultyEngine(); var d=Difficulty(); repeat(500){ engine.record(true,300); d=engine.adjust(d) }; assertTrue(d.speed<=1.6f); assertTrue(d.complexity<=2); repeat(500){engine.record(false,2000);d=engine.adjust(d)};assertTrue(d.speed>=.75f);assertTrue(d.complexity>=0) }
     @Test fun acceptedAnswerCannotScoreTwiceForTheSameObject() { var now=1_000L;val engine=GameSessionEngine(Random(1)){now};engine.start();val round=engine.state.current!!;assertNotNull(engine.answer(round.decisionId,round.isAnomaly));val first=engine.state;assertNull(engine.answer(round.decisionId,round.isAnomaly));assertEquals(first,engine.state) }
+    @Test fun pauseFreezesRunAndDecisionClocksUntilResume() {
+        var now = 1_000L
+        val engine = GameSessionEngine(Random(7)) { now }
+        engine.start()
+        val round = engine.state.current!!
+        val remainingBeforePause = engine.state.remainingMs
+        engine.pause()
+        now += 10_000L
+        engine.tick()
+        assertTrue(engine.state.paused)
+        assertEquals(remainingBeforePause, engine.state.remainingMs)
+        assertNull(engine.answer(round.decisionId, round.isAnomaly))
+        engine.resume()
+        assertFalse(engine.state.paused)
+        assertEquals(round.spawnedAt + 10_000L, engine.state.current!!.spawnedAt)
+        now += 100L
+        assertNotNull(engine.answer(round.decisionId, round.isAnomaly))
+        assertEquals(1, engine.state.stats.total)
+    }
     @Test fun rapidDecisionForNewObjectIsAcceptedWithinPreviousGuardWindow() {
         var now=1_000L
         val engine=GameSessionEngine(Random(41)){now}

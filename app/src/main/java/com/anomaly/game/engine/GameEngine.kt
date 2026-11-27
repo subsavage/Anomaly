@@ -31,7 +31,7 @@ data class DecisionContext(
 )
 data class DecisionResolution(val decisionId: Long, val correct: Boolean, val responseTimeMillis: Long?, val timedOut: Boolean)
 data class Stats(val score: Int = 0, val correct: Int = 0, val total: Int = 0, val combo: Int = 0, val bestCombo: Int = 0, val transitions: Int = 0, val reactionTotal: Long = 0, val errors: Int = 0)
-data class GameState(val running: Boolean = false, val finished: Boolean = false, val remainingMs: Long = 60_000, val integrity: Int = 3, val rule: Rule? = null, val history: List<GameObject> = emptyList(), val current: RoundObject? = null, val stats: Stats = Stats(), val difficulty: Difficulty = Difficulty(), val message: String = "", val lastCorrect: Boolean? = null, val best: Int = 0, val tutorialStep: Int = 0, val settings: Boolean = false, val decisionHistory: List<DecisionContext> = emptyList(), val endReason: RunEndReason? = null)
+data class GameState(val running: Boolean = false, val finished: Boolean = false, val paused: Boolean = false, val remainingMs: Long = 60_000, val integrity: Int = 3, val rule: Rule? = null, val history: List<GameObject> = emptyList(), val current: RoundObject? = null, val stats: Stats = Stats(), val difficulty: Difficulty = Difficulty(), val message: String = "", val lastCorrect: Boolean? = null, val best: Int = 0, val tutorialStep: Int = 0, val settings: Boolean = false, val decisionHistory: List<DecisionContext> = emptyList(), val endReason: RunEndReason? = null)
 data class GameResult(val score: Int, val best: Int, val accuracy: Int, val correct: Int, val bestCombo: Int, val transitions: Int, val newBest: Boolean)
 
 object ObjectGenerator {
@@ -182,6 +182,7 @@ class GameSessionEngine(private val random: Random = Random.Default, private val
     var state = GameState(); private set
     private var difficulty = DifficultyEngine()
     private var startedAt = 0L
+    private var pausedAt: Long? = null
     private var lastSpawn = 0L
     private var lastAnomalyFamily: Family? = null
     private var lastWasAnomaly = false
@@ -189,7 +190,24 @@ class GameSessionEngine(private val random: Random = Random.Default, private val
     private var transitionAtTotal: Int? = null
     private var transitionPreviousRule: Rule? = null
     fun start(best: Int = state.best) {
-        startedAt = clock(); difficulty = DifficultyEngine(); lastAnomalyFamily = null; lastWasAnomaly = false; transitionAtTotal = null; transitionPreviousRule = null; state = GameState(running = true, best = best, rule = PatternGenerator.next(random, 0)); spawn()
+        startedAt = clock(); pausedAt = null; difficulty = DifficultyEngine(); lastAnomalyFamily = null; lastWasAnomaly = false; transitionAtTotal = null; transitionPreviousRule = null; state = GameState(running = true, best = best, rule = PatternGenerator.next(random, 0)); spawn()
+    }
+    fun pause() {
+        if (!state.running || state.paused) return
+        pausedAt = clock()
+        state = state.copy(paused = true)
+    }
+    fun resume() {
+        val pauseStart = pausedAt ?: return
+        val pausedDuration = (clock() - pauseStart).coerceAtLeast(0L)
+        startedAt += pausedDuration
+        state.current?.let { state = state.copy(current = it.copy(spawnedAt = it.spawnedAt + pausedDuration)) }
+        pausedAt = null
+        state = state.copy(paused = false)
+    }
+    fun abort() {
+        pausedAt = null
+        state = GameState(best = state.best)
     }
     private fun spawn() {
         if (!state.running) return
@@ -214,7 +232,7 @@ class GameSessionEngine(private val random: Random = Random.Default, private val
         state = state.copy(remainingMs = elapsed, current = RoundObject(item, anomaly, rule, now, (decisionDeadlineMs / state.difficulty.speed).toLong().coerceAtLeast(1100), recentPreviousRule, decisionId))
     }
     fun tick(): DecisionResolution? {
-        if (!state.running) return null
+        if (!state.running || state.paused) return null
         val now = clock(); val elapsed = now - startedAt
         if (elapsed >= 60_000) { finish(RunEndReason.TIME_EXPIRED); return null }
         val current = state.current
@@ -225,7 +243,7 @@ class GameSessionEngine(private val random: Random = Random.Default, private val
     fun answer(decisionId: Long, anomaly: Boolean): DecisionResolution? = resolve(decisionId, anomaly, clock())
     private fun resolve(decisionId: Long, answer: Boolean?, now: Long): DecisionResolution? {
         val round = state.current ?: return null
-        if (!state.running || round.decisionId != decisionId) return null
+        if (!state.running || state.paused || round.decisionId != decisionId) return null
         val responseTime = now - round.spawnedAt
         val lateResponse = answer != null && responseTime > round.deadlineMs
         val followsRule = PatternEvaluator.follows(round.item, round.ruleAtSpawn, state.history)
