@@ -2,6 +2,7 @@ package com.anomaly.game.engine
 
 import org.junit.Assert.*
 import org.junit.Test
+import kotlin.math.roundToLong
 import kotlin.random.Random
 
 class GameEngineTest {
@@ -325,6 +326,83 @@ class GameEngineTest {
         engine.answer(firstUnderNewRule.decisionId,firstUnderNewRule.isAnomaly)
         assertEquals(1,engine.state.stats.transitions)
         assertEquals(15,engine.state.stats.correct)
+    }
+
+    @Test fun transitionGraceAppliesOnceAndLeavesRecentContextObjectsAtNormalDeadline() {
+        var now = 0L
+        val engine = GameSessionEngine(Random(78)) { now }
+        engine.start()
+        assertEquals(2_600L, engine.state.current!!.deadlineMs)
+
+        repeat(13) {
+            now += 200L
+            val round = engine.state.current!!
+            engine.answer(round.decisionId, round.isAnomaly)
+        }
+        val warningObject = engine.state.current!!
+        assertEquals(13, engine.state.stats.total)
+        assertEquals("SYSTEM ALERT · PATTERN SHIFT NEXT", engine.state.message)
+        val warningDeadline = warningObject.deadlineMs
+        now += 100L
+        engine.tick()
+        assertEquals(warningDeadline, engine.state.current!!.deadlineMs)
+        now += 100L
+        engine.answer(warningObject.decisionId, warningObject.isAnomaly)
+
+        assertEquals(1, engine.state.stats.transitions)
+        val firstUnderNewRule = engine.state.current!!
+        assertNotNull(firstUnderNewRule.previousRule)
+        assertEquals(3_250L, firstUnderNewRule.deadlineMs)
+
+        now += 200L
+        engine.answer(firstUnderNewRule.decisionId, firstUnderNewRule.isAnomaly)
+        repeat(2) {
+            val round = engine.state.current!!
+            assertEquals(2_600L, round.deadlineMs)
+            assertNotNull("recent-transition context should outlast grace", round.previousRule)
+            now += 200L
+            engine.answer(round.decisionId, round.isAnomaly)
+        }
+        assertNull("recent context has expired by the fourth object", engine.state.current!!.previousRule)
+        assertEquals(2_600L, engine.state.current!!.deadlineMs)
+    }
+
+    @Test fun everyProtocolTransitionGrantsOneGraceUsingTheAdaptiveNormalDeadline() {
+        var now = 0L
+        val baseDeadlineMs = 3_100L
+        val engine = GameSessionEngine(Random(79), decisionDeadlineMs = baseDeadlineMs) { now }
+        engine.start()
+        var graceForCurrentObject = false
+        var graceObjectCount = 0
+        var recentContextWithoutGraceCount = 0
+
+        repeat(80) { iteration ->
+            assertNotNull("run ended at iteration $iteration with ${engine.state}", engine.state.current)
+            val round = engine.state.current!!
+            val normalDeadline = (baseDeadlineMs / engine.state.difficulty.speed).toLong().coerceAtLeast(1_100L)
+            val expectedDeadline = if (graceForCurrentObject) {
+                (normalDeadline * 1.25).roundToLong().coerceAtLeast(normalDeadline)
+            } else normalDeadline
+            assertEquals(expectedDeadline, round.deadlineMs)
+            if (!graceForCurrentObject && round.previousRule != null) recentContextWithoutGraceCount++
+
+            val deadlineSnapshot = round.deadlineMs
+            now += 100L
+            engine.tick()
+            assertEquals(deadlineSnapshot, engine.state.current!!.deadlineMs)
+            val transitionCountBefore = engine.state.stats.transitions
+            now += 100L
+            engine.answer(round.decisionId, round.isAnomaly)
+            val transitionDelta = engine.state.stats.transitions - transitionCountBefore
+            assertTrue("a spawn can activate at most one transition", transitionDelta in 0..1)
+            graceForCurrentObject = transitionDelta == 1
+            if (graceForCurrentObject) graceObjectCount++
+        }
+
+        assertTrue("the run should cover several protocol changes", engine.state.stats.transitions >= 3)
+        assertEquals(engine.state.stats.transitions, graceObjectCount)
+        assertTrue("speed adaptation should affect normal deadlines", engine.state.difficulty.speed > 1f)
+        assertTrue("recent-transition context must not grant additional grace", recentContextWithoutGraceCount >= 2)
     }
 
     @Test fun protocolChangeCounterCountsMultipleChangesInOneRun() {

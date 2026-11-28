@@ -1,6 +1,7 @@
 package com.anomaly.game.engine
 
 import kotlin.math.max
+import kotlin.math.roundToLong
 import kotlin.random.Random
 
 enum class Shape { CIRCLE, SQUARE, TRIANGLE }
@@ -53,7 +54,7 @@ object PatternGenerator {
         return when (random.nextInt(if (level >= 2) 3 else 2)) {
             0 -> sequence(random)
             1 -> attribute(random, level)
-            else -> Rule(Family.RELATIONSHIP, "Dot count increases by one", relation = "dots+1")
+            else -> Rule(Family.RELATIONSHIP, "Dots increase by one; after 3, wrap to 0.", relation = "dots+1")
         }
     }
 
@@ -135,11 +136,13 @@ object DecisionExplanation {
 /** Shape loops are always identified as repeating and expose the next expected shape. Other rules keep their established direct wording. */
 fun Rule.playerInstruction(history: List<GameObject>): String = if (family == Family.SEQUENCE) {
     "Repeating order: ${sequence.joinToString(" → ") { it.displayName() }}"
+} else if (family == Family.RELATIONSHIP && relation == "dots+1") {
+    "Dots increase by one; after 3, wrap to 0."
 } else label
 
 fun Rule.focusCue(history: List<GameObject>): String = if (family == Family.SEQUENCE && sequence.isNotEmpty()) {
     "NEXT SHAPE: ${sequence[history.size % sequence.size].displayName()}"
-} else label
+} else playerInstruction(history)
 object AnomalyGenerator {
     fun generate(random: Random, rule: Rule, history: List<GameObject>): GameObject {
         repeat(20) {
@@ -188,6 +191,10 @@ class DifficultyEngine {
 }
 
 class GameSessionEngine(private val random: Random = Random.Default, private val decisionDeadlineMs: Long = 2600, private val clock: () -> Long = System::currentTimeMillis) {
+    private companion object {
+        const val TRANSITION_GRACE_PERCENT = 0.25
+    }
+
     var state = GameState(); private set
     private var difficulty = DifficultyEngine()
     private var startedAt = 0L
@@ -198,8 +205,9 @@ class GameSessionEngine(private val random: Random = Random.Default, private val
     private var nextDecisionId = 1L
     private var transitionAtTotal: Int? = null
     private var transitionPreviousRule: Rule? = null
+    private var transitionGracePending = false
     fun start(best: Int = state.best) {
-        startedAt = clock(); pausedAt = null; difficulty = DifficultyEngine(); lastAnomalyFamily = null; lastWasAnomaly = false; transitionAtTotal = null; transitionPreviousRule = null; state = GameState(running = true, best = best, rule = PatternGenerator.next(random, 0)); spawn()
+        startedAt = clock(); pausedAt = null; difficulty = DifficultyEngine(); lastAnomalyFamily = null; lastWasAnomaly = false; transitionAtTotal = null; transitionPreviousRule = null; transitionGracePending = false; state = GameState(running = true, best = best, rule = PatternGenerator.next(random, 0)); spawn()
     }
     fun pause() {
         if (!state.running || state.paused) return
@@ -227,6 +235,7 @@ class GameSessionEngine(private val random: Random = Random.Default, private val
         if (state.stats.total > 0 && state.stats.total % switchEvery == 0) {
             transitionPreviousRule = state.rule
             transitionAtTotal = state.stats.total
+            transitionGracePending = true
             state = state.copy(rule = PatternGenerator.next(random, state.difficulty.complexity), stats = state.stats.copy(transitions = state.stats.transitions + 1), message = "PATTERN SHIFT")
         }
         if (state.stats.total > 0 && (state.stats.total + 1) % switchEvery == 0) state = state.copy(message = "SYSTEM ALERT · PATTERN SHIFT NEXT")
@@ -238,7 +247,12 @@ class GameSessionEngine(private val random: Random = Random.Default, private val
         if (anomaly) lastAnomalyFamily = rule.family
         val recentPreviousRule = transitionAtTotal?.let { total -> if (state.stats.total - total in 0..2) transitionPreviousRule else null }
         val decisionId = nextDecisionId++
-        state = state.copy(remainingMs = elapsed, current = RoundObject(item, anomaly, rule, now, (decisionDeadlineMs / state.difficulty.speed).toLong().coerceAtLeast(1100), recentPreviousRule, decisionId))
+        val normalDeadlineMs = (decisionDeadlineMs / state.difficulty.speed).toLong().coerceAtLeast(1100)
+        val objectDeadlineMs = if (transitionGracePending) {
+            (normalDeadlineMs * (1.0 + TRANSITION_GRACE_PERCENT)).roundToLong().coerceAtLeast(normalDeadlineMs)
+        } else normalDeadlineMs
+        transitionGracePending = false
+        state = state.copy(remainingMs = elapsed, current = RoundObject(item, anomaly, rule, now, objectDeadlineMs, recentPreviousRule, decisionId))
     }
     fun tick(): DecisionResolution? {
         if (!state.running || state.paused) return null
