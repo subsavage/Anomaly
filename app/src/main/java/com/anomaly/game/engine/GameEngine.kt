@@ -7,13 +7,20 @@ enum class Shape { CIRCLE, SQUARE, TRIANGLE }
 enum class Hue { CORAL, BLUE, YELLOW, GREEN }
 data class GameObject(val shape: Shape, val hue: Hue, val dots: Int, val size: Int = 1)
 enum class Family { SEQUENCE, ATTRIBUTE, RELATIONSHIP }
-data class Rule(val family: Family, val label: String, val sequence: List<Shape> = emptyList(), val hue: Hue? = null, val dots: Int? = null, val relation: String? = null)
+data class Rule(val family: Family, val label: String, val sequence: List<Shape> = emptyList(), val hue: Hue? = null, val dots: Int? = null, val relation: String? = null) {
+    val id: String get() = when (family) {
+        Family.SEQUENCE -> "sequence:${sequence.joinToString("-") { it.name.lowercase() }}"
+        Family.ATTRIBUTE -> "attribute:hue=${hue?.name?.lowercase() ?: "any"};dots=${dots ?: "any"}"
+        Family.RELATIONSHIP -> "relationship:${relation ?: "unknown"}"
+    }
+}
 data class Difficulty(val speed: Float = 1f, val complexity: Int = 0, val subtlety: Int = 0, val transitionRate: Int = 0)
 data class RoundObject(val item: GameObject, val isAnomaly: Boolean, val ruleAtSpawn: Rule, val spawnedAt: Long, val deadlineMs: Long, val previousRule: Rule? = null, val decisionId: Long)
 enum class RunEndReason { INTEGRITY_DEPLETED, TIME_EXPIRED }
 data class DecisionContext(
     val objectOrdinal: Int,
     val item: GameObject,
+    val activeRuleId: String,
     val activeRule: Rule,
     val activeRuleDescription: String,
     val correctAnomaly: Boolean,
@@ -31,7 +38,9 @@ data class DecisionContext(
 )
 data class DecisionResolution(val decisionId: Long, val correct: Boolean, val responseTimeMillis: Long?, val timedOut: Boolean)
 data class Stats(val score: Int = 0, val correct: Int = 0, val total: Int = 0, val combo: Int = 0, val bestCombo: Int = 0, val transitions: Int = 0, val reactionTotal: Long = 0, val errors: Int = 0)
-data class GameState(val running: Boolean = false, val finished: Boolean = false, val paused: Boolean = false, val remainingMs: Long = 60_000, val integrity: Int = 3, val rule: Rule? = null, val history: List<GameObject> = emptyList(), val current: RoundObject? = null, val stats: Stats = Stats(), val difficulty: Difficulty = Difficulty(), val message: String = "", val lastCorrect: Boolean? = null, val best: Int = 0, val tutorialStep: Int = 0, val settings: Boolean = false, val decisionHistory: List<DecisionContext> = emptyList(), val endReason: RunEndReason? = null)
+data class GameState(val running: Boolean = false, val finished: Boolean = false, val paused: Boolean = false, val remainingMs: Long = 60_000, val integrity: Int = 3, val rule: Rule? = null, val history: List<GameObject> = emptyList(), val current: RoundObject? = null, val stats: Stats = Stats(), val difficulty: Difficulty = Difficulty(), val message: String = "", val lastCorrect: Boolean? = null, val best: Int = 0, val tutorialStep: Int = 0, val settings: Boolean = false, val decisionHistory: List<DecisionContext> = emptyList(), val endReason: RunEndReason? = null) {
+    val missedCalls: List<DecisionContext> get() = decisionHistory.filterNot { it.wasCorrect }
+}
 data class GameResult(val score: Int, val best: Int, val accuracy: Int, val correct: Int, val bestCombo: Int, val transitions: Int, val newBest: Boolean)
 
 object ObjectGenerator {
@@ -252,7 +261,8 @@ class GameSessionEngine(private val random: Random = Random.Default, private val
         val context = DecisionContext(
             objectOrdinal = state.stats.total + 1,
             item = round.item,
-            activeRule = round.ruleAtSpawn,
+            activeRuleId = round.ruleAtSpawn.id,
+            activeRule = round.ruleAtSpawn.snapshot(),
             activeRuleDescription = round.ruleAtSpawn.playerInstruction(state.history),
             correctAnomaly = correctAnomaly,
             playerAnomaly = answer,
@@ -262,8 +272,8 @@ class GameSessionEngine(private val random: Random = Random.Default, private val
             responseTimeMillis = responseTime.coerceAtLeast(0L).takeUnless { answer == null },
             explanation = if(lateResponse) "The response arrived after this object's decision window expired." else DecisionExplanation.describe(round.item, round.ruleAtSpawn, state.history),
             recentTransition = round.previousRule != null,
-            previousRule = round.previousRule,
-            newRule = round.ruleAtSpawn.takeIf { round.previousRule != null },
+            previousRule = round.previousRule?.snapshot(),
+            newRule = round.ruleAtSpawn.snapshot().takeIf { round.previousRule != null },
             previousRuleDescription = round.previousRule?.playerInstruction(state.history),
             newRuleDescription = round.ruleAtSpawn.playerInstruction(state.history).takeIf { round.previousRule != null }
         )
@@ -273,7 +283,7 @@ class GameSessionEngine(private val random: Random = Random.Default, private val
         val nextDifficulty = difficulty.adjust(state.difficulty)
         val newHistory = (state.history + round.item)
         val life = state.integrity - if (correct) 0 else 1
-        state = state.copy(stats = newStats, integrity = life, current = null, history = newHistory, difficulty = nextDifficulty, message = if (correct && combo == 3) "COMBO x1.2" else if (correct && combo == 5) "COMBO x1.5" else if (correct && combo >= 8) "SYSTEM OVERRIDE" else if (!correct) "SIGNAL LOST" else "+${ScoringEngine.points(combo)}", lastCorrect = correct, decisionHistory = (state.decisionHistory + context).takeLast(64))
+        state = state.copy(stats = newStats, integrity = life, current = null, history = newHistory, difficulty = nextDifficulty, message = if (correct && combo == 3) "COMBO x1.2" else if (correct && combo == 5) "COMBO x1.5" else if (correct && combo >= 8) "SYSTEM OVERRIDE" else if (!correct) "SIGNAL LOST" else "+${ScoringEngine.points(combo)}", lastCorrect = correct, decisionHistory = state.decisionHistory + context)
         when {
             life <= 0 -> finish(RunEndReason.INTEGRITY_DEPLETED)
             now - startedAt >= 60_000 -> finish(RunEndReason.TIME_EXPIRED)
@@ -281,6 +291,37 @@ class GameSessionEngine(private val random: Random = Random.Default, private val
         }
         return DecisionResolution(round.decisionId, correct, responseTime.coerceAtLeast(0L).takeUnless { answer == null }, answer == null)
     }
-    private fun finish(reason: RunEndReason) { state = state.copy(running = false, finished = true, remainingMs = (60_000 - (clock() - startedAt)).coerceAtLeast(0), current = null, endReason = reason) }
+    private fun finish(reason: RunEndReason) {
+        if (reason == RunEndReason.TIME_EXPIRED) recordTerminalTimeout()
+        state = state.copy(running = false, finished = true, remainingMs = (60_000 - (clock() - startedAt)).coerceAtLeast(0), current = null, endReason = reason)
+    }
+    private fun recordTerminalTimeout() {
+        val round = state.current ?: return
+        val historyAtSpawn = state.history
+        val followsRule = PatternEvaluator.follows(round.item, round.ruleAtSpawn, historyAtSpawn)
+        val ruleSnapshot = round.ruleAtSpawn.snapshot()
+        val context = DecisionContext(
+            objectOrdinal = state.stats.total + 1,
+            item = round.item,
+            activeRuleId = ruleSnapshot.id,
+            activeRule = ruleSnapshot,
+            activeRuleDescription = ruleSnapshot.playerInstruction(historyAtSpawn),
+            correctAnomaly = !followsRule,
+            playerAnomaly = null,
+            wasCorrect = false,
+            timedOut = true,
+            lateResponse = false,
+            responseTimeMillis = null,
+            explanation = DecisionExplanation.describe(round.item, ruleSnapshot, historyAtSpawn),
+            recentTransition = round.previousRule != null,
+            previousRule = round.previousRule?.snapshot(),
+            newRule = ruleSnapshot.takeIf { round.previousRule != null },
+            previousRuleDescription = round.previousRule?.snapshot()?.playerInstruction(historyAtSpawn),
+            newRuleDescription = ruleSnapshot.playerInstruction(historyAtSpawn).takeIf { round.previousRule != null }
+        )
+        state = state.copy(decisionHistory = state.decisionHistory + context)
+    }
     fun result(personalBest: Int): GameResult { val s = state.stats; val scoreBest = max(personalBest, s.score); return GameResult(s.score, scoreBest, if (s.total == 0) 0 else (100.0 * s.correct / s.total).toInt(), s.correct, s.bestCombo, s.transitions, s.score > personalBest) }
 }
+
+private fun Rule.snapshot(): Rule = copy(sequence = sequence.toList())

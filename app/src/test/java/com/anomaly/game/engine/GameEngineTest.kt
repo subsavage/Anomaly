@@ -134,6 +134,7 @@ class GameEngineTest {
             if(it==2) {
                 val final=engine.state.decisionHistory.last()
                 assertEquals(RunEndReason.INTEGRITY_DEPLETED,engine.state.endReason)
+                assertEquals(3,engine.state.missedCalls.size)
                 assertEquals(round.item,final.item)
                 assertEquals(round.ruleAtSpawn,final.activeRule)
                 assertEquals(round.ruleAtSpawn.playerInstruction(history),final.activeRuleDescription)
@@ -161,9 +162,112 @@ class GameEngineTest {
         }
         val final=engine.state.decisionHistory.last()
         assertEquals(RunEndReason.INTEGRITY_DEPLETED,engine.state.endReason)
+        assertEquals(3,engine.state.missedCalls.size)
         assertTrue(final.timedOut)
         assertNull(final.playerAnomaly)
         assertFalse(final.wasCorrect)
+    }
+
+    @Test fun multipleIncorrectDecisionsAreAvailableAsMissedCalls() {
+        var now = 1_000L
+        val engine = GameSessionEngine(Random(71)) { now }
+        engine.start()
+        repeat(2) {
+            now += 200L
+            val round = engine.state.current!!
+            engine.answer(round.decisionId, !round.isAnomaly)
+        }
+        assertEquals(2, engine.state.missedCalls.size)
+        assertTrue(engine.state.missedCalls.all { !it.wasCorrect && !it.timedOut && it.playerAnomaly != null })
+    }
+
+    @Test fun multipleTimeoutsAreAvailableAsMissedCalls() {
+        var now = 0L
+        val engine = GameSessionEngine(Random(72)) { now }
+        engine.start()
+        repeat(2) {
+            val round = engine.state.current!!
+            now = round.spawnedAt + round.deadlineMs + 1L
+            engine.tick()
+        }
+        assertEquals(2, engine.state.missedCalls.size)
+        assertTrue(engine.state.missedCalls.all { it.timedOut && !it.wasCorrect && it.playerAnomaly == null })
+    }
+
+    @Test fun incorrectAnswersAndTimeoutsShareTheMissedCallHistory() {
+        var now = 0L
+        val engine = GameSessionEngine(Random(73)) { now }
+        engine.start()
+        now += 200L
+        val wrong = engine.state.current!!
+        engine.answer(wrong.decisionId, !wrong.isAnomaly)
+        val timedOut = engine.state.current!!
+        now = timedOut.spawnedAt + timedOut.deadlineMs + 1L
+        engine.tick()
+        assertEquals(2, engine.state.missedCalls.size)
+        assertFalse(engine.state.missedCalls[0].timedOut)
+        assertTrue(engine.state.missedCalls[1].timedOut)
+    }
+
+    @Test fun correctDecisionsAreExcludedFromMissedCalls() {
+        var now = 0L
+        val engine = GameSessionEngine(Random(74)) { now }
+        engine.start()
+        repeat(5) {
+            now += 200L
+            val round = engine.state.current!!
+            engine.answer(round.decisionId, round.isAnomaly)
+        }
+        assertEquals(5, engine.state.decisionHistory.size)
+        assertTrue(engine.state.decisionHistory.all { it.wasCorrect })
+        assertTrue(engine.state.missedCalls.isEmpty())
+    }
+
+    @Test fun missedCallKeepsItsRuleSnapshotAcrossProtocolTransitions() {
+        var now = 0L
+        val engine = GameSessionEngine(Random(75)) { now }
+        engine.start()
+        val initialRound = engine.state.current!!
+        val initialRule = initialRound.ruleAtSpawn.copy(sequence = initialRound.ruleAtSpawn.sequence.toList())
+        now += 200L
+        engine.answer(initialRound.decisionId, !initialRound.isAnomaly)
+        repeat(13) {
+            now += 200L
+            val round = engine.state.current!!
+            engine.answer(round.decisionId, round.isAnomaly)
+        }
+        assertTrue(engine.state.stats.transitions > 0)
+        val historical = engine.state.missedCalls.first()
+        assertEquals(initialRule, historical.activeRule)
+        assertEquals(initialRule.id, historical.activeRuleId)
+        assertFalse(historical.activeRuleDescription.isBlank())
+    }
+
+    @Test fun missedCallReviewIsAvailableAfterTimerExpiration() {
+        var now = 10_000L
+        val engine = GameSessionEngine(Random(76)) { now }
+        engine.start()
+        val wrong = engine.state.current!!
+        now += 200L
+        engine.answer(wrong.decisionId, !wrong.isAnomaly)
+        now = 70_000L
+        engine.tick()
+        assertEquals(RunEndReason.TIME_EXPIRED, engine.state.endReason)
+        assertEquals(2, engine.state.missedCalls.size)
+        assertTrue(engine.state.missedCalls.last().timedOut)
+        assertEquals(1, engine.state.stats.total)
+    }
+
+    @Test fun cleanRunHasAnEmptyMissedCallReview() {
+        var now = 0L
+        val engine = GameSessionEngine(Random(77)) { now }
+        engine.start()
+        repeat(3) {
+            now += 200L
+            val round = engine.state.current!!
+            engine.answer(round.decisionId, round.isAnomaly)
+        }
+        assertTrue(engine.state.missedCalls.isEmpty())
     }
 
     @Test fun recentTransitionContextIsAttachedToDecisionSnapshot() {
@@ -188,8 +292,10 @@ class GameEngineTest {
         engine.start()
         repeat(2) { now+=200; val r=engine.state.current!!; engine.answer(r.decisionId,!r.isAnomaly) }
         assertEquals(2,engine.state.decisionHistory.size)
+        assertEquals(2,engine.state.missedCalls.size)
         engine.start()
         assertTrue(engine.state.decisionHistory.isEmpty())
+        assertTrue(engine.state.missedCalls.isEmpty())
         assertNull(engine.state.endReason)
         assertNull(engine.state.current?.previousRule)
     }

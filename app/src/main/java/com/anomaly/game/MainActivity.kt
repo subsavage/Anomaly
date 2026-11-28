@@ -758,59 +758,51 @@ private fun instructionWithColorWords(text: String): AnnotatedString = buildAnno
 @Composable private fun ResultsScreen(model:ArcadeModel,s:GameState,best:Int){
     val r=remember(s.stats,best){GameSessionEngine().let { GameResult(s.stats.score, maxOf(best,s.stats.score),if(s.stats.total==0)0 else s.stats.correct*100/s.stats.total,s.stats.correct,s.stats.bestCombo,s.stats.transitions,s.stats.score>best) }}
     val failure = s.endReason == RunEndReason.INTEGRITY_DEPLETED
-    val finalDecision = s.decisionHistory.lastOrNull().takeIf { failure }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(14.dp)){
         Column(horizontalAlignment=Alignment.CenterHorizontally){Text(when { failure -> "SIGNAL LOST"; r.newBest -> "NEW PERSONAL BEST"; else -> "SESSION COMPLETE" },color=when { failure -> coral; r.newBest -> amber; else -> cyan },fontFamily=systemMono,fontSize=11.sp,letterSpacing=2.sp);Text("${r.score}",color=white,fontSize=58.sp,fontWeight=FontWeight.Black,modifier=Modifier.padding(top=10.dp));Text("POINTS",color=muted,fontFamily=systemMono,fontSize=10.sp,letterSpacing=2.sp)}
         Column(Modifier.fillMaxWidth().background(panel,RoundedCornerShape(20.dp)).padding(20.dp)){
             ResultLine("ACCURACY","${r.accuracy}%");ResultLine("CORRECT CLASSIFICATIONS","${r.correct}");ResultLine("BEST COMBO","${s.stats.bestCombo}×");ResultLine("PROTOCOL CHANGES","${s.stats.transitions}");ResultLine("PERSONAL BEST","${r.best}")
         }
-        if(finalDecision != null) FinalDecisionAnalysis(finalDecision)
+        MissedCallsReview(s.missedCalls)
         Column(Modifier.fillMaxWidth().padding(top=4.dp),horizontalAlignment=Alignment.CenterHorizontally){BigButton("PLAY AGAIN",cyan,model::playAgain);Text("HOME",color=muted,fontSize=12.sp,letterSpacing=2.sp,modifier=Modifier.clickable(onClick=model::home).padding(20.dp))}
     }
 }
 
-@Composable private fun FinalDecisionAnalysis(decision: DecisionContext) {
-    Column(Modifier.fillMaxWidth().background(bgSecondary,RoundedCornerShape(18.dp)).border(1.dp,coral.copy(alpha=.55f),RoundedCornerShape(18.dp)).padding(16.dp)) {
-        Text("FINAL DECISION ANALYSIS",color=coral,fontFamily=systemMono,fontSize=10.sp,fontWeight=FontWeight.Bold,letterSpacing=1.3.sp)
-        Text("ACTIVE PROTOCOL",color=muted,fontFamily=systemMono,fontSize=8.sp,letterSpacing=1.1.sp,modifier=Modifier.padding(top=14.dp))
-        Text(decision.activeRuleDescription,color=cyan,fontSize=14.sp,fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(top=4.dp))
-
-        Row(Modifier.fillMaxWidth().padding(top=12.dp),verticalAlignment=Alignment.CenterVertically) {
-            ObjectGlyph(decision.item,Modifier.size(74.dp))
-            Column(Modifier.padding(start=12.dp)) {
-                Text("INCOMING OBJECT",color=muted,fontFamily=systemMono,fontSize=8.sp,letterSpacing=1.sp)
-                val shape=decision.item.shape.name.lowercase().replaceFirstChar(Char::uppercase)
-                val hue=decision.item.hue.name.lowercase().replaceFirstChar(Char::uppercase)
-                Text("$shape · $hue · ${decision.item.dots} ${if(decision.item.dots==1) "DOT" else "DOTS"}",color=white,fontSize=11.sp,fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(top=4.dp))
+@Composable private fun MissedCallsReview(missedCalls: List<DecisionContext>) {
+    Column(Modifier.fillMaxWidth().background(bgSecondary, RoundedCornerShape(16.dp)).border(1.dp, border.copy(alpha = .6f), RoundedCornerShape(16.dp)).padding(14.dp)) {
+        Text("MISSED CALLS", color = cyan, fontFamily = systemMono, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
+        if (missedCalls.isEmpty()) {
+            Text("No missed calls. Clean read.", color = muted, fontSize = 12.sp, modifier = Modifier.padding(top = 9.dp))
+        } else {
+            Column(
+                Modifier.fillMaxWidth().heightIn(max = 220.dp).verticalScroll(rememberScrollState()).padding(top = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                missedCalls.forEach { decision -> MissedCallRow(decision) }
             }
         }
+    }
+}
 
-        Spacer(Modifier.height(8.dp))
-        ResultLine("YOUR LAST DECISION",when {
-            decision.timedOut && decision.playerAnomaly == null -> "TIMEOUT · NO RESPONSE"
-            decision.lateResponse -> "LATE · ${decision.playerAnomaly?.toDecisionLabel()}"
-            else -> decision.playerAnomaly?.toDecisionLabel() ?: "NO RESPONSE"
-        })
-        ResultLine("CORRECT CLASSIFICATION",decision.correctAnomaly.toDecisionLabel())
-        Text(decision.explanation,color=white,fontSize=12.sp,lineHeight=17.sp,modifier=Modifier.padding(top=4.dp))
-
-        if(decision.recentTransition && decision.previousRule != null && decision.newRule != null) {
-            Column(Modifier.fillMaxWidth().padding(top=14.dp).background(panel,RoundedCornerShape(12.dp)).padding(12.dp)) {
-                Text("RECENT PROTOCOL CHANGE",color=amber,fontFamily=systemMono,fontSize=8.sp,fontWeight=FontWeight.Bold,letterSpacing=1.sp)
-                Text("PREVIOUS PROTOCOL",color=muted,fontFamily=systemMono,fontSize=8.sp,letterSpacing=.8.sp,modifier=Modifier.padding(top=8.dp))
-                Text(decision.previousRuleDescription ?: decision.previousRule.label,color=white,fontSize=11.sp,modifier=Modifier.padding(top=3.dp))
-                Text("NEW PROTOCOL",color=amber,fontFamily=systemMono,fontSize=8.sp,letterSpacing=.8.sp,modifier=Modifier.padding(top=8.dp))
-                Text(decision.newRuleDescription ?: decision.newRule.label,color=cyan,fontSize=11.sp,modifier=Modifier.padding(top=3.dp))
+@Composable private fun MissedCallRow(decision: DecisionContext) {
+    Column(Modifier.fillMaxWidth().background(panel.copy(alpha = .65f), RoundedCornerShape(11.dp)).padding(10.dp)) {
+        Row(verticalAlignment = Alignment.Top) {
+            ObjectGlyph(decision.item, Modifier.size(42.dp))
+            Column(Modifier.weight(1f).padding(start = 9.dp)) {
+                Text("CALL ${decision.objectOrdinal.toString().padStart(2, '0')} · ${decision.activeRuleId}", color = muted, fontFamily = systemMono, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(decision.activeRuleDescription, color = cyan, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp))
+                val outcome = when {
+                    decision.timedOut -> "TIMEOUT · EXPECTED ${decision.correctAnomaly.toDecisionLabel()}"
+                    decision.lateResponse -> "LATE ${decision.playerAnomaly?.toDecisionLabel() ?: "ANSWER"} · EXPECTED ${decision.correctAnomaly.toDecisionLabel()}"
+                    else -> "YOU ${decision.playerAnomaly?.toDecisionLabel() ?: "—"} · EXPECTED ${decision.correctAnomaly.toDecisionLabel()}"
+                }
+                Text(outcome, color = if (decision.timedOut || decision.lateResponse) amber else coral, fontFamily = systemMono, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
             }
         }
-
-        val echoObservation = when {
-            decision.recentTransition -> "The protocol had just changed. Check the active rule above."
-            decision.timedOut -> "The signal expired before you answered."
-            decision.lateResponse -> "Your selection arrived after the response window closed."
-            else -> null
+        Text(decision.explanation, color = white, fontSize = 10.sp, lineHeight = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 5.dp))
+        if (decision.recentTransition && decision.previousRuleDescription != null) {
+            Text("RECENT SHIFT · WAS ${decision.previousRuleDescription}", color = amber, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp))
         }
-        if(echoObservation != null) Text("ECHO  /  $echoObservation",color=cyan,fontSize=10.sp,lineHeight=14.sp,modifier=Modifier.padding(top=12.dp))
     }
 }
 
